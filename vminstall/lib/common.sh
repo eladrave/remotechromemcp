@@ -42,6 +42,7 @@ vm_init_paths() {
     prefix=$(realpath -m -- "$REMOTE_CHROME_TEST_ROOT")
     [[ $prefix == /tmp/* && -d $prefix && ! -L $REMOTE_CHROME_TEST_ROOT ]] ||
       vm_die 64 'REMOTE_CHROME_TEST_ROOT must be a real directory beneath /tmp'
+    REMOTE_CHROME_CANONICAL_TEST_ROOT=$prefix
     REMOTE_CHROME_INSTALL_ROOT=${prefix}/opt/remotechromemcp
     REMOTE_CHROME_CONFIG_ROOT=${prefix}/etc/remote-chrome
     REMOTE_CHROME_SYSTEMD_ROOT=${prefix}/etc/systemd/system
@@ -54,6 +55,29 @@ vm_init_paths() {
     REMOTE_CHROME_SYSTEMD_ROOT=${REMOTE_CHROME_SYSTEMD_ROOT:-/etc/systemd/system}
     REMOTE_CHROME_CLI_ROOT=${REMOTE_CHROME_CLI_ROOT:-/usr/local/sbin}
   fi
+}
+
+vm_require_confined_destination() {
+  [[ ${REMOTE_CHROME_DRY_RUN:-0} == 1 ]] || return 0
+  [[ -n ${REMOTE_CHROME_TEST_ROOT:-} &&
+     -n ${REMOTE_CHROME_CANONICAL_TEST_ROOT:-} ]] || {
+    printf 'ERROR: dry-run destination has no test root: %s\n' "$1" >&2
+    return 1
+  }
+
+  local current_root destination
+  current_root=$(realpath -e -- "$REMOTE_CHROME_TEST_ROOT") || return 1
+  [[ $current_root == "$REMOTE_CHROME_CANONICAL_TEST_ROOT" ]] || return 1
+  destination=$(realpath -m -- "$1") || return 1
+  case "$destination" in
+    "$REMOTE_CHROME_CANONICAL_TEST_ROOT"|"$REMOTE_CHROME_CANONICAL_TEST_ROOT"/*)
+      return 0
+      ;;
+    *)
+      printf 'ERROR: dry-run destination escapes test root: %s\n' "$1" >&2
+      return 1
+      ;;
+  esac
 }
 
 vm_validate_domain() {

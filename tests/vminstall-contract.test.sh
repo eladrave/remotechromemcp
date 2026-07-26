@@ -294,13 +294,13 @@ with base_archive(os.path.join(root, "traversal.tar.gz")) as archive:
 with base_archive(os.path.join(root, "symlink.tar.gz")) as archive:
     info = tarfile.TarInfo("remotechromemcp-v1.2.3/vminstall/escape-link")
     info.type = tarfile.SYMTYPE
-    info.linkname = "../../../archive-escape"
+    info.linkname = "../../../archive-escape -> harmless"
     archive.addfile(info)
 
 with base_archive(os.path.join(root, "hardlink.tar.gz")) as archive:
     info = tarfile.TarInfo("remotechromemcp-v1.2.3/vminstall/escape-hardlink")
     info.type = tarfile.LNKTYPE
-    info.linkname = "../../archive-escape"
+    info.linkname = "../../archive-escape link to harmless"
     archive.addfile(info)
 
 with base_archive(os.path.join(root, "device.tar.gz")) as archive:
@@ -309,6 +309,17 @@ with base_archive(os.path.join(root, "device.tar.gz")) as archive:
     info.devmajor = 1
     info.devminor = 3
     archive.addfile(info)
+
+with base_archive(os.path.join(root, "fifo.tar.gz")) as archive:
+    info = tarfile.TarInfo("remotechromemcp-v1.2.3/vminstall/fifo")
+    info.type = tarfile.FIFOTYPE
+    archive.addfile(info)
+
+with base_archive(os.path.join(root, "newline.tar.gz")) as archive:
+    add_file(archive, "remotechromemcp-v1.2.3/newline\nmember")
+
+with base_archive(os.path.join(root, "control.tar.gz")) as archive:
+    add_file(archive, "remotechromemcp-v1.2.3/control-\x01-member")
 
 with tarfile.open(os.path.join(root, "remotechromemcp-master.tar.gz"), "w:gz") as archive:
     add_file(archive, "remotechromemcp-master/compose.yaml")
@@ -320,7 +331,8 @@ PY
   sha256sum remotechromemcp-v1.2.3.tar.gz \
     >remotechromemcp-v1.2.3.tar.gz.sha256
 )
-for hostile_archive in absolute traversal symlink hardlink device; do
+for hostile_archive in \
+  absolute traversal symlink hardlink device fifo newline control; do
   mkdir "$release_fixture/$hostile_archive"
   cp "$release_fixture/$hostile_archive.tar.gz" \
     "$release_fixture/$hostile_archive/remotechromemcp-v1.2.3.tar.gz"
@@ -342,7 +354,8 @@ vm_verify_release "$STAGED_RELEASE_DIR" ||
 [[ ! -e "$(vm_release_dir)" ]] ||
   fail 'release staging must not create or replace the final release directory'
 
-for hostile_archive in absolute traversal symlink hardlink device; do
+for hostile_archive in \
+  absolute traversal symlink hardlink device fifo newline control; do
   rm -rf -- "$expected_staging"
   set +e
   (
@@ -379,6 +392,46 @@ set -e
   fail 'checksum must be verified before creating the extraction staging directory'
 mv "$checksum_file.valid" "$checksum_file"
 
+alternate_file="$release_fixture/not-the-release.tar.gz"
+printf 'alternate\n' >"$alternate_file"
+alternate_hash="$(sha256sum "$alternate_file" | awk '{print $1}')"
+valid_hash="$(sha256sum "$release_fixture/remotechromemcp-v1.2.3.tar.gz" |
+  awk '{print $1}')"
+for manifest_case in alternate extra malformed; do
+  case "$manifest_case" in
+    alternate)
+      printf '%s  %s\n' "$alternate_hash" "${alternate_file##*/}" \
+        >"$checksum_file"
+      ;;
+    extra)
+      {
+        printf '%s  %s\n' \
+          "$valid_hash" remotechromemcp-v1.2.3.tar.gz
+        printf '%s  %s\n' "$alternate_hash" "${alternate_file##*/}"
+      } >"$checksum_file"
+      ;;
+    malformed)
+      printf '%s  %s\n' not-a-sha256 remotechromemcp-v1.2.3.tar.gz \
+        >"$checksum_file"
+      ;;
+  esac
+  rm -rf -- "$expected_staging"
+  set +e
+  (
+    SELECTED_VERSION=v1.2.3
+    vm_stage_release "$release_fixture/remotechromemcp-v1.2.3.tar.gz"
+  ) >"$test_root/manifest-$manifest_case.stdout" \
+    2>"$test_root/manifest-$manifest_case.stderr"
+  manifest_status=$?
+  set -e
+  [[ $manifest_status -ne 0 ]] ||
+    fail "pinned release must reject a $manifest_case checksum manifest"
+  [[ ! -d "$expected_staging" ]] ||
+    fail "$manifest_case checksum manifest must fail before staging"
+done
+printf '%s  %s\n' "$valid_hash" remotechromemcp-v1.2.3.tar.gz \
+  >"$checksum_file"
+
 sentinel="$REMOTE_CHROME_INSTALL_ROOT/releases/keep-me"
 mkdir -p "$sentinel"
 : >"$sentinel/sentinel"
@@ -393,6 +446,48 @@ set -e
 [[ $cleanup_status -ne 0 && -f "$sentinel/sentinel" ]] ||
   fail 'failed staging cleanup must preserve unrelated release content'
 
+release_symlink_root="$test_root/release-symlink-root"
+release_symlink_escape="$test_root/release-symlink-escape"
+mkdir "$release_symlink_root" "$release_symlink_escape"
+REMOTE_CHROME_DRY_RUN=1
+REMOTE_CHROME_TEST_ROOT="$release_symlink_root"
+vm_init_paths
+ln -s ../release-symlink-escape "$release_symlink_root/opt"
+set +e
+(
+  SELECTED_VERSION=v1.2.3
+  vm_stage_release "$release_fixture/remotechromemcp-v1.2.3.tar.gz"
+) >"$test_root/release-symlink.stdout" \
+  2>"$test_root/release-symlink.stderr"
+release_symlink_status=$?
+set -e
+[[ $release_symlink_status -ne 0 ]] ||
+  fail 'release staging must reject a descendant symlink escape'
+[[ -z $(find "$release_symlink_escape" -mindepth 1 -print -quit) ]] ||
+  fail 'release staging must not write through a descendant symlink escape'
+
+config_symlink_root="$test_root/config-symlink-root"
+config_symlink_escape="$test_root/config-symlink-escape"
+mkdir "$config_symlink_root" "$config_symlink_escape"
+REMOTE_CHROME_TEST_ROOT="$config_symlink_root"
+vm_init_paths
+ln -s ../config-symlink-escape "$config_symlink_root/etc"
+set +e
+(
+  SELECTED_VERSION=master
+  vm_stage_release "$release_fixture/remotechromemcp-master.tar.gz"
+) >"$test_root/config-symlink.stdout" \
+  2>"$test_root/config-symlink.stderr"
+config_symlink_status=$?
+set -e
+[[ $config_symlink_status -ne 0 ]] ||
+  fail 'unpinned release marking must reject a descendant symlink escape'
+[[ ! -e "$config_symlink_escape/remote-chrome/install.env" ]] ||
+  fail 'unpinned release marking must not escape the dry-run fixture root'
+
+REMOTE_CHROME_DRY_RUN=0
+REMOTE_CHROME_TEST_ROOT="$test_root"
+vm_init_paths
 SELECTED_VERSION=master
 master_log="$test_root/master.log"
 COMMAND_LOG="$master_log"

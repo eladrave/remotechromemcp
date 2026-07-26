@@ -49,7 +49,24 @@ case "$name" in
     ;;
   getent)
     [[ ${1:-} == ahosts ]] || exit 64
-    printf '%s STREAM %s\n' "${FAKE_DOMAIN_IP:-203.0.113.10}" "${2:-unknown}"
+    query=${2:-}
+    case "$query" in
+      *:*|[0-9]*)
+        [[ ${FAKE_GETENT_NUMERIC_FAIL:-0} != 1 ]] || exit 2
+        case "$query" in
+          2001:0db8:0000:0000:0000:0000:0000:0010|2001:db8::10)
+            printf '%s STREAM %s\n' 2001:db8::10 "$query"
+            ;;
+          *)
+            printf '%s STREAM %s\n' "$query" "$query"
+            ;;
+        esac
+        ;;
+      *)
+        printf '%s STREAM %s\n' \
+          "${FAKE_DOMAIN_IP:-203.0.113.10}" "${query:-unknown}"
+        ;;
+    esac
     ;;
   curl)
     case "$*" in
@@ -65,12 +82,16 @@ case "$name" in
   ss)
     printf '%s' "${FAKE_SS_OUTPUT:-}"
     ;;
+  timeout)
+    shift
+    "$@"
+    ;;
 esac
 FAKE
 chmod +x "$fake_bin/fake-command"
 for command_name in \
   getent curl ss apt-get dpkg systemctl docker gpg install mv \
-  mkfs fdisk parted wipefs; do
+  timeout mkfs fdisk parted wipefs; do
   ln -s fake-command "$fake_bin/$command_name"
 done
 
@@ -103,6 +124,7 @@ reset_fakes() {
   export FAKE_METADATA_IP=
   export FAKE_PUBLIC_IP=203.0.113.10
   export FAKE_SS_OUTPUT=
+  export FAKE_GETENT_NUMERIC_FAIL=0
 }
 
 run_main_expect_failure() {
@@ -185,6 +207,27 @@ arch_status=$?
 set -e
 [[ $arch_status -ne 0 ]] || fail 'Docker installation must reject non-amd64 dpkg architecture'
 assert_no_mutations
+
+reset_fakes
+descendant_root="$test_root/descendant-root"
+descendant_escape="$test_root/descendant-escape"
+mkdir "$descendant_root" "$descendant_escape"
+REMOTE_CHROME_DRY_RUN=1
+REMOTE_CHROME_TEST_ROOT="$descendant_root"
+REMOTE_CHROME_OS_RELEASE=tests/fixtures/os-release-ubuntu-24.04
+REMOTE_CHROME_TEST_ARCH=x86_64
+vm_init_paths
+vm_load_platform
+ln -s ../descendant-escape "$descendant_root/etc"
+set +e
+(vm_install_docker) \
+  >"$test_root/descendant.stdout" 2>"$test_root/descendant.stderr"
+descendant_status=$?
+set -e
+[[ $descendant_status -ne 0 ]] ||
+  fail 'dry-run Docker writes must reject a descendant symlink escape'
+[[ -z $(find "$descendant_escape" -mindepth 1 -print -quit) ]] ||
+  fail 'dry-run Docker writes must not follow a descendant symlink outside the fixture root'
 
 reset_fakes
 FAKE_DOCKER_PRESENT=1
@@ -271,16 +314,39 @@ grep -Fq 'curl <-fsS> <--max-time> <5>' "$command_log" ||
 reset_fakes
 DOMAIN=chrome.example.com
 SKIP_DNS_CHECK=0
-FAKE_DOMAIN_IP=2001:db8::10
+FAKE_DOMAIN_IP=2001:0db8:0000:0000:0000:0000:0000:0010
 FAKE_METADATA_IP='[2001:DB8::10]'
 FAKE_PUBLIC_IP=198.51.100.99
 export FAKE_DOMAIN_IP FAKE_METADATA_IP FAKE_PUBLIC_IP
 vm_verify_dns ||
-  fail 'normalized metadata IP must satisfy DNS verification'
+  fail 'expanded and compressed forms of the same IPv6 address must compare equal'
 grep -Fq 'metadata.google.internal' "$command_log" ||
   fail 'DNS verification must try GCE metadata discovery'
 ! grep -Fq 'api.ipify.org' "$command_log" ||
   fail 'successful metadata discovery must skip the public fallback'
+grep -Fxq \
+  'timeout <5> <getent> <ahosts> <2001:0db8:0000:0000:0000:0000:0000:0010>' \
+  "$command_log" ||
+  fail 'DNS IPv6 values must use the bounded trusted numeric-address parser'
+grep -Fxq 'timeout <5> <getent> <ahosts> <2001:DB8::10>' "$command_log" ||
+  fail 'public IPv6 values must use the bounded trusted numeric-address parser'
+
+reset_fakes
+DOMAIN=chrome.example.com
+SKIP_DNS_CHECK=0
+FAKE_DOMAIN_IP=2001:db8::10
+FAKE_METADATA_IP=2001:db8::10
+FAKE_GETENT_NUMERIC_FAIL=1
+export FAKE_DOMAIN_IP FAKE_METADATA_IP FAKE_GETENT_NUMERIC_FAIL
+set +e
+(vm_verify_dns) >"$test_root/parser-failure.stdout" \
+  2>"$test_root/parser-failure.stderr"
+parser_failure_status=$?
+set -e
+[[ $parser_failure_status -ne 0 ]] ||
+  fail 'DNS verification must reject an address the numeric parser cannot validate'
+grep -Fq 'timeout <5> <getent> <ahosts>' "$command_log" ||
+  fail 'numeric-address parser failures must remain bounded to five seconds'
 
 reset_fakes
 export REMOTE_CHROME_TEST_ROOT="$test_root"
@@ -335,6 +401,14 @@ vm_verify_dns
 
 if grep -Eq '^(mkfs|fdisk|parted|wipefs)([ <]|$)' "$all_command_log"; then
   fail 'generic installer must never invoke destructive disk tools'
+fi
+
+disk_tool_source_matches="$test_root/disk-tool-source.matches"
+if grep -En \
+  '(^|[^[:alnum:]_])(mkfs(\.[[:alnum:]_-]+)?|fdisk|parted|wipefs)([^[:alnum:]_]|$)' \
+  vminstall/install.sh vminstall/installer-main.sh vminstall/lib/*.sh \
+  >"$disk_tool_source_matches"; then
+  fail "generic installer source contains a forbidden disk-tool invocation: $(cat "$disk_tool_source_matches")"
 fi
 
 printf 'PASS: VM host, distribution, Docker, and network preflight contracts\n'

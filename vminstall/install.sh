@@ -1,6 +1,78 @@
 #!/bin/sh
 set -eu
 
+bootstrap_fail() {
+  printf 'ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+bootstrap_archive_path_is_safe() {
+  archive_member=$1
+  [ -n "$archive_member" ] || return 1
+  case "$archive_member" in
+    /*|*\\*) return 1 ;;
+  esac
+
+  old_ifs=$IFS
+  IFS=/
+  set -f
+  set -- $archive_member
+  set +f
+  IFS=$old_ifs
+  for component do
+    [ "$component" != .. ] || return 1
+  done
+}
+
+bootstrap_validate_archive() {
+  archive_to_validate=$1
+  archive_names=$(
+    LC_ALL=C tar --list --gzip --file "$archive_to_validate" \
+      --quoting-style=escape
+  ) || return 1
+  while IFS= read -r archive_member; do
+    bootstrap_archive_path_is_safe "$archive_member" || return 1
+  done <<EOF
+$archive_names
+EOF
+
+  archive_types=$(
+    LC_ALL=C tar --list --verbose --gzip --file "$archive_to_validate" \
+      --quoting-style=escape
+  ) || return 1
+  while IFS= read -r archive_line; do
+    archive_type=${archive_line%"${archive_line#?}"}
+    case "$archive_type" in
+      -|d) ;;
+      *) return 1 ;;
+    esac
+  done <<EOF
+$archive_types
+EOF
+}
+
+bootstrap_validate_checksum_manifest() {
+  manifest=$1
+  expected_archive=$2
+  [ -f "$manifest" ] || return 1
+  awk 'END { exit NR == 1 ? 0 : 1 }' "$manifest" || return 1
+  IFS= read -r manifest_line <"$manifest" || return 1
+  manifest_hash=${manifest_line%% *}
+  [ "$manifest_line" = "$manifest_hash  $expected_archive" ] || return 1
+  [ "${#manifest_hash}" -eq 64 ] || return 1
+  case "$manifest_hash" in
+    *[!0123456789abcdefABCDEF]*) return 1 ;;
+  esac
+}
+
+if [ "${1:-}" = --validate-archive ]; then
+  [ "$#" -eq 2 ] ||
+    bootstrap_fail '--validate-archive requires exactly one archive'
+  bootstrap_validate_archive "$2" ||
+    bootstrap_fail 'release archive contains an unsafe member'
+  exit 0
+fi
+
 default_ref=master
 selected_ref=$default_ref
 tmp_dir=$(mktemp -d)
@@ -14,11 +86,6 @@ cleanup() {
   fi
 }
 trap cleanup 0 HUP INT TERM
-
-bootstrap_fail() {
-  printf 'ERROR: %s\n' "$*" >&2
-  exit 1
-}
 
 bootstrap_usage() {
   printf '%s\n' \
@@ -81,12 +148,16 @@ curl -fsSL "$archive_url" -o "$archive_file"
 if [ "$selected_ref" != master ]; then
   checksum_file=$tmp_dir/$checksum_name
   curl -fsSL "$checksum_url" -o "$checksum_file"
+  bootstrap_validate_checksum_manifest "$checksum_file" "$archive_name" ||
+    bootstrap_fail 'release checksum manifest is invalid'
   (
     cd "$tmp_dir"
     sha256sum -c "$checksum_name"
   )
 fi
 
+bootstrap_validate_archive "$archive_file" ||
+  bootstrap_fail 'release archive contains an unsafe member'
 extract_root=$tmp_dir/extracted
 mkdir -p "$extract_root"
 tar -xzf "$archive_file" -C "$extract_root"

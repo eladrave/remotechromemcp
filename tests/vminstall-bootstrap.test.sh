@@ -39,7 +39,9 @@ curl_log="$test_root/curl.log"
 sha_log="$test_root/sha256sum.log"
 archive_file="$test_root/release.tar.gz"
 checksum_file="$test_root/release.tar.gz.sha256"
+hostile_fixture="$test_root/hostile-fixtures"
 mkdir -p "$archive_source/remotechromemcp-fixture/vminstall" "$fake_bin"
+mkdir "$hostile_fixture"
 
 cat >"$archive_source/remotechromemcp-fixture/vminstall/installer-main.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -60,6 +62,70 @@ tar -czf "$archive_file" -C "$archive_source" remotechromemcp-fixture
 archive_hash="$(sha256sum "$archive_file" | awk '{print $1}')"
 printf '%s  %s\n' \
   "$archive_hash" remotechromemcp-v1.0.0.tar.gz >"$checksum_file"
+
+export BOOTSTRAP_HOSTILE_FIXTURE="$hostile_fixture"
+export BOOTSTRAP_ABSOLUTE_ESCAPE="$test_root/bootstrap-absolute-escape"
+export REMOTE_CHROME_EXTRACTION_MARKER="$extraction_marker"
+python3 <<'PY'
+import io
+import os
+import tarfile
+
+root = os.environ["BOOTSTRAP_HOSTILE_FIXTURE"]
+
+def add_file(archive, name, content=b"fixture\n"):
+    info = tarfile.TarInfo(name)
+    info.size = len(content)
+    info.mode = 0o755 if name.endswith("installer-main.sh") else 0o644
+    archive.addfile(info, io.BytesIO(content))
+
+def base_archive(path):
+    archive = tarfile.open(path, "w:gz")
+    add_file(
+        archive,
+        "remotechromemcp-fixture/vminstall/installer-main.sh",
+        b"#!/usr/bin/env bash\nprintf 'hostile installer ran\\n' >"
+        + os.environ["REMOTE_CHROME_EXTRACTION_MARKER"].encode()
+        + b"\n",
+    )
+    return archive
+
+with base_archive(os.path.join(root, "absolute.tar.gz")) as archive:
+    add_file(archive, os.environ["BOOTSTRAP_ABSOLUTE_ESCAPE"])
+
+with base_archive(os.path.join(root, "traversal.tar.gz")) as archive:
+    add_file(archive, "remotechromemcp-fixture/../../bootstrap-traversal")
+
+with base_archive(os.path.join(root, "symlink-arrow.tar.gz")) as archive:
+    info = tarfile.TarInfo("remotechromemcp-fixture/vminstall/escape-link")
+    info.type = tarfile.SYMTYPE
+    info.linkname = "../../../outside -> harmless"
+    archive.addfile(info)
+
+with base_archive(os.path.join(root, "hardlink-arrow.tar.gz")) as archive:
+    info = tarfile.TarInfo("remotechromemcp-fixture/vminstall/escape-hardlink")
+    info.type = tarfile.LNKTYPE
+    info.linkname = "../../outside link to harmless"
+    archive.addfile(info)
+
+with base_archive(os.path.join(root, "device.tar.gz")) as archive:
+    info = tarfile.TarInfo("remotechromemcp-fixture/vminstall/device")
+    info.type = tarfile.CHRTYPE
+    info.devmajor = 1
+    info.devminor = 3
+    archive.addfile(info)
+
+with base_archive(os.path.join(root, "fifo.tar.gz")) as archive:
+    info = tarfile.TarInfo("remotechromemcp-fixture/vminstall/fifo")
+    info.type = tarfile.FIFOTYPE
+    archive.addfile(info)
+
+with base_archive(os.path.join(root, "newline.tar.gz")) as archive:
+    add_file(archive, "remotechromemcp-fixture/newline\nmember")
+
+with base_archive(os.path.join(root, "control.tar.gz")) as archive:
+    add_file(archive, "remotechromemcp-fixture/control-\x01-member")
+PY
 
 cat >"$fake_bin/curl" <<'EOF'
 #!/bin/sh
@@ -112,7 +178,7 @@ run_bootstrap() {
     PATH=/usr/bin:/bin \
     REMOTE_CHROME_TEST_ROOT="$test_root" \
     REMOTE_CHROME_FAKE_BIN="$fake_bin" \
-    REMOTE_CHROME_FAKE_ARCHIVE="$archive_file" \
+    REMOTE_CHROME_FAKE_ARCHIVE="${REMOTE_CHROME_FAKE_ARCHIVE_OVERRIDE:-$archive_file}" \
     REMOTE_CHROME_FAKE_CHECKSUM="${REMOTE_CHROME_FAKE_CHECKSUM_OVERRIDE:-$checksum_file}" \
     REMOTE_CHROME_CURL_LOG="$curl_log" \
     REMOTE_CHROME_SHA_LOG="$sha_log" \
@@ -198,6 +264,57 @@ set -e
   fail 'pinned release must fail when checksum verification fails'
 [[ ! -e "$capture_args" && ! -e "$extraction_marker" ]] ||
   fail 'checksum failure must stop before extraction or installer mutation'
+
+alternate_checksum="$test_root/alternate-release.tar.gz.sha256"
+empty_hash="$(printf '' | sha256sum | awk '{print $1}')"
+valid_hash="$(sha256sum "$archive_file" | awk '{print $1}')"
+for manifest_case in alternate extra malformed; do
+  case "$manifest_case" in
+    alternate)
+      printf '%s  installer.args\n' "$empty_hash" \
+        >"$alternate_checksum"
+      ;;
+    extra)
+      {
+        printf '%s  remotechromemcp-v1.0.0.tar.gz\n' "$valid_hash"
+        printf '%s  installer.args\n' "$empty_hash"
+      } >"$alternate_checksum"
+      ;;
+    malformed)
+      printf '%s  remotechromemcp-v1.0.0.tar.gz\n' not-a-sha256 \
+        >"$alternate_checksum"
+      ;;
+  esac
+  set +e
+  REMOTE_CHROME_FAKE_CHECKSUM_OVERRIDE="$alternate_checksum" \
+    run_bootstrap --version v1.0.0 --non-interactive \
+      >"$test_root/manifest-$manifest_case.stdout" \
+      2>"$test_root/manifest-$manifest_case.stderr"
+  manifest_status=$?
+  set -e
+  [[ $manifest_status -ne 0 ]] ||
+    fail "bootstrap must reject a $manifest_case checksum manifest"
+  [[ ! -e "$capture_args" && ! -e "$extraction_marker" ]] ||
+    fail "$manifest_case checksum manifest must fail before extraction or installer execution"
+done
+
+for hostile_case in \
+  absolute traversal symlink-arrow hardlink-arrow device fifo newline control; do
+  set +e
+  REMOTE_CHROME_FAKE_ARCHIVE_OVERRIDE="$hostile_fixture/$hostile_case.tar.gz" \
+    run_bootstrap --non-interactive \
+      >"$test_root/hostile-$hostile_case.stdout" \
+      2>"$test_root/hostile-$hostile_case.stderr"
+  hostile_status=$?
+  set -e
+  [[ $hostile_status -ne 0 ]] ||
+    fail "bootstrap must reject a $hostile_case archive before extraction"
+  [[ ! -e "$capture_args" && ! -e "$extraction_marker" ]] ||
+    fail "$hostile_case archive must fail before installer execution"
+  [[ ! -e "$BOOTSTRAP_ABSOLUTE_ESCAPE" &&
+     ! -e "$test_root/bootstrap-traversal" ]] ||
+    fail "$hostile_case archive must not write outside the extraction root"
+done
 
 newline_arg="$(printf 'first line\nsecond line')"
 rm -f "$capture_args" "$extraction_marker" "$curl_log" "$sha_log"

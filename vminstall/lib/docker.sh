@@ -34,16 +34,24 @@ vm_install_docker() {
   vm_run_mutation install -m 0755 -d "$keyring_dir"
 
   if [[ ${REMOTE_CHROME_DRY_RUN:-0} == 1 ]]; then
+    vm_require_confined_destination "$keyring_dir" || return 1
+    vm_require_confined_destination "$source_dir" || return 1
     mkdir -p -- "$keyring_dir" "$source_dir"
     vm_run_mutation curl -fsSL --max-time 30 \
       "https://download.docker.com/linux/$OS_ID/gpg" \
       -o "$keyring.tmp.$$"
     vm_run_mutation gpg --dearmor --output "$keyring.new.$$" "$keyring.tmp.$$"
+    vm_require_confined_destination "$keyring.new.$$" || return 1
     : >"$keyring.new.$$"
     vm_run_mutation install -m 0644 "$keyring.new.$$" "$keyring.pending.$$"
+    vm_require_confined_destination "$keyring.pending.$$" || return 1
     : >"$keyring.pending.$$"
     vm_run_mutation mv -f "$keyring.pending.$$" "$keyring"
+    vm_require_confined_destination "$keyring" || return 1
     cp -- "$keyring.pending.$$" "$keyring"
+    vm_require_confined_destination "$keyring.tmp.$$" || return 1
+    vm_require_confined_destination "$keyring.new.$$" || return 1
+    vm_require_confined_destination "$keyring.pending.$$" || return 1
     rm -f -- "$keyring.tmp.$$" "$keyring.new.$$" "$keyring.pending.$$"
   else
     local temp_dir
@@ -60,12 +68,17 @@ vm_install_docker() {
   local source_line
   source_line="deb [arch=amd64 signed-by=$keyring] https://download.docker.com/linux/$OS_ID $codename stable"
   if [[ ${REMOTE_CHROME_DRY_RUN:-0} == 1 ]]; then
+    vm_require_confined_destination "$source_file.pending.$$" || return 1
     printf '%s\n' "$source_line" >"$source_file.pending.$$"
     vm_run_mutation install -m 0644 "$source_file.pending.$$" "$source_file.new.$$"
+    vm_require_confined_destination "$source_file.new.$$" || return 1
     cp -- "$source_file.pending.$$" "$source_file.new.$$"
     vm_run_mutation mv -f "$source_file.new.$$" "$source_file"
+    vm_require_confined_destination "$source_file" || return 1
     cp -- "$source_file.new.$$" "$source_file"
+    vm_require_confined_destination "$source_file.new.$$" || return 1
     rm -f -- "$source_file.new.$$"
+    vm_require_confined_destination "$source_file.pending.$$" || return 1
     rm -f -- "$source_file.pending.$$"
   else
     local source_temp
