@@ -103,4 +103,6 @@ while IFS= read -r bootstrap_arg || [ -n "$bootstrap_arg" ]; do
   set -- "$@" "$bootstrap_arg"
 done <"$args_file"
 
+REMOTE_CHROME_RELEASE_ARCHIVE=$archive_file
+export REMOTE_CHROME_RELEASE_ARCHIVE
 bash "$extracted_dir/vminstall/installer-main.sh" "$@"

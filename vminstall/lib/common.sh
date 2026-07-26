@@ -11,6 +11,25 @@ vm_log() {
   printf '[remote-chrome] %s\n' "$*"
 }
 
+vm_log_command() {
+  local command_log=${COMMAND_LOG:-}
+  [[ -n $command_log ]] || return 0
+  {
+    printf '%s' "$1"
+    shift
+    printf ' <%s>' "$@"
+    printf '\n'
+  } >>"$command_log"
+}
+
+vm_run_mutation() {
+  if [[ ${REMOTE_CHROME_DRY_RUN:-0} == 1 ]]; then
+    vm_log_command "$@"
+    return 0
+  fi
+  "$@"
+}
+
 vm_require_root() {
   local effective_uid=${REMOTE_CHROME_TEST_EUID:-$EUID}
   [[ $effective_uid -eq 0 ]] ||
@@ -44,32 +63,4 @@ vm_validate_domain() {
 
 vm_validate_email() {
   [[ ${1:-} =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]]
-}
-
-vm_load_platform() {
-  local release_file=${REMOTE_CHROME_OS_RELEASE:-/etc/os-release}
-  local ID=
-  local VERSION_ID=
-
-  [[ -r $release_file ]] ||
-    vm_die 65 "Cannot read platform metadata: $release_file"
-  # os-release is a shell-compatible assignment file provided by the OS.
-  # shellcheck disable=SC1090
-  source "$release_file"
-
-  PLATFORM_ID=${ID:-}
-  PLATFORM_VERSION_ID=${VERSION_ID:-}
-  PLATFORM_ARCH=${REMOTE_CHROME_TEST_ARCH:-$(uname -m)}
-}
-
-vm_validate_platform() {
-  case "$PLATFORM_ARCH" in
-    x86_64|amd64) ;;
-    *) return 1 ;;
-  esac
-
-  case "$PLATFORM_ID:$PLATFORM_VERSION_ID" in
-    ubuntu:22.04|ubuntu:24.04|debian:12) return 0 ;;
-    *) return 1 ;;
-  esac
 }

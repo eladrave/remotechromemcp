@@ -33,6 +33,7 @@ grep -Fq 'requires a value' "$missing_version_output" ||
 archive_source="$test_root/archive-source"
 fake_bin="$test_root/fake-bin"
 capture_args="$test_root/installer.args"
+capture_archive="$test_root/installer.archive"
 extraction_marker="$test_root/extracted-installer-ran"
 curl_log="$test_root/curl.log"
 sha_log="$test_root/sha256sum.log"
@@ -45,8 +46,13 @@ cat >"$archive_source/remotechromemcp-fixture/vminstall/installer-main.sh" <<'EO
 set -euo pipefail
 
 : "${REMOTE_CHROME_CAPTURE_ARGS:?}"
+: "${REMOTE_CHROME_CAPTURE_ARCHIVE:?}"
 : "${REMOTE_CHROME_EXTRACTION_MARKER:?}"
+: "${REMOTE_CHROME_RELEASE_ARCHIVE:?}"
+[[ -f "$REMOTE_CHROME_RELEASE_ARCHIVE" ]]
 printf '%s\n' "$@" >"$REMOTE_CHROME_CAPTURE_ARGS"
+printf '%s\n' "${REMOTE_CHROME_RELEASE_ARCHIVE##*/}" \
+  >"$REMOTE_CHROME_CAPTURE_ARCHIVE"
 printf 'executed\n' >"$REMOTE_CHROME_EXTRACTION_MARKER"
 EOF
 chmod +x "$archive_source/remotechromemcp-fixture/vminstall/installer-main.sh"
@@ -99,7 +105,9 @@ EOF
 chmod +x "$fake_bin/curl" "$fake_bin/sha256sum"
 
 run_bootstrap() {
-  rm -f "$capture_args" "$extraction_marker" "$curl_log" "$sha_log"
+  rm -f \
+    "$capture_args" "$capture_archive" "$extraction_marker" \
+    "$curl_log" "$sha_log"
   env \
     PATH=/usr/bin:/bin \
     REMOTE_CHROME_TEST_ROOT="$test_root" \
@@ -109,6 +117,7 @@ run_bootstrap() {
     REMOTE_CHROME_CURL_LOG="$curl_log" \
     REMOTE_CHROME_SHA_LOG="$sha_log" \
     REMOTE_CHROME_CAPTURE_ARGS="$capture_args" \
+    REMOTE_CHROME_CAPTURE_ARCHIVE="$capture_archive" \
     REMOTE_CHROME_EXTRACTION_MARKER="$extraction_marker" \
     dash vminstall/install.sh "$@"
 }
@@ -123,6 +132,8 @@ master_output="$(
 
 [[ -f "$extraction_marker" ]] ||
   fail 'bootstrap must extract and invoke the archived Bash installer'
+grep -Fxq 'remotechromemcp-master.tar.gz' "$capture_archive" ||
+  fail 'bootstrap must hand the downloaded master archive to the installer'
 grep -Fiq 'unpinned' <<<"$master_output" ||
   fail 'master installs must be labeled as unpinned'
 cat >"$test_root/master-expected.args" <<EOF
@@ -158,6 +169,8 @@ $pinned_data_dir
 EOF
 diff -u "$test_root/pinned-expected.args" "$capture_args" ||
   fail 'pinned release arguments must be forwarded literally'
+grep -Fxq 'remotechromemcp-v1.0.0.tar.gz' "$capture_archive" ||
+  fail 'bootstrap must hand the checksummed pinned archive to the installer'
 grep -Fqx \
   'https://github.com/eladrave/remotechromemcp/releases/download/v1.0.0/remotechromemcp-v1.0.0.tar.gz' \
   "$curl_log" ||

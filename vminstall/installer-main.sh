@@ -6,16 +6,34 @@ installer_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$installer_dir/lib/common.sh"
 # shellcheck source=lib/wizard.sh
 source "$installer_dir/lib/wizard.sh"
+# shellcheck source=lib/host.sh
+source "$installer_dir/lib/host.sh"
+# shellcheck source=lib/docker.sh
+source "$installer_dir/lib/docker.sh"
+# shellcheck source=lib/release.sh
+source "$installer_dir/lib/release.sh"
 
 vm_installer_main() {
   vm_parse_args "$@" || return $?
-  vm_require_root
+  vm_collect_configuration
   vm_init_paths
-  vm_load_platform
+  vm_load_platform ||
+    vm_die 65 'Unable to load platform metadata'
   vm_validate_platform ||
     vm_die 65 "Unsupported platform: $PLATFORM_ID $PLATFORM_VERSION_ID $PLATFORM_ARCH"
-  vm_collect_configuration
-  vm_log 'Validation complete; no host changes have been made'
+  vm_check_host
+  vm_verify_dns ||
+    vm_die 69 'DNS verification failed'
+  vm_check_public_ports ||
+    vm_die 69 'Ports 80 and 443 must be available'
+  vm_install_docker
+  [[ -n ${REMOTE_CHROME_RELEASE_ARCHIVE:-} ]] ||
+    vm_die 66 'REMOTE_CHROME_RELEASE_ARCHIVE is required for release staging'
+  vm_stage_release "$REMOTE_CHROME_RELEASE_ARCHIVE" ||
+    vm_die 66 'Release verification or staging failed'
+  vm_verify_release "$STAGED_RELEASE_DIR" ||
+    vm_die 66 'Staged release is incomplete'
+  vm_log 'Verified release staged; release activation has not started'
 }
 
 if [[ ${REMOTE_CHROME_SKIP_MAIN:-0} != 1 ]]; then

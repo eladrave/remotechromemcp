@@ -86,6 +86,22 @@ REMOTE_CHROME_OS_RELEASE=tests/fixtures/os-release-debian-12 \
 ! vm_validate_platform ||
   fail 'unsupported aarch64 platform must be rejected'
 
+os_release_injection="$test_root/os-release-injection"
+malicious_os_release="$test_root/os-release-malicious"
+{
+  printf '%s\n' \
+    'ID=ubuntu' \
+    'VERSION_ID="24.04"' \
+    "NAME=\$(touch $os_release_injection)"
+} >"$malicious_os_release"
+REMOTE_CHROME_OS_RELEASE="$malicious_os_release" \
+  REMOTE_CHROME_TEST_ARCH=x86_64 \
+  vm_load_platform
+vm_validate_platform ||
+  fail 'platform parser must accept supported ID and VERSION_ID assignments'
+[[ ! -e $os_release_injection ]] ||
+  fail 'platform parser must never execute os-release content'
+
 REMOTE_CHROME_TEST_ROOT="$test_root" vm_init_paths
 [[ "$REMOTE_CHROME_INSTALL_ROOT" == "$test_root/opt/remotechromemcp" ]] ||
   fail 'install root must be confined beneath the test root'
@@ -238,4 +254,154 @@ done
 [[ ! -e "$missing_tty" ]] ||
   fail 'noninteractive mode must not create or read a fallback input path'
 
-printf 'PASS: VM installer validation, platform, and no-TTY contracts\n'
+declare -F vm_stage_release >/dev/null ||
+  fail 'vm_stage_release is undefined'
+declare -F vm_verify_release >/dev/null ||
+  fail 'vm_verify_release is undefined'
+
+release_fixture="$test_root/release-fixtures"
+mkdir "$release_fixture"
+export RELEASE_FIXTURE="$release_fixture"
+export ARCHIVE_ABSOLUTE_ESCAPE="$test_root/absolute-archive-escape"
+python3 <<'PY'
+import io
+import os
+import tarfile
+
+root = os.environ["RELEASE_FIXTURE"]
+
+def add_file(archive, name, content=b"fixture\n"):
+    info = tarfile.TarInfo(name)
+    info.size = len(content)
+    info.mode = 0o644
+    archive.addfile(info, io.BytesIO(content))
+
+def base_archive(path):
+    archive = tarfile.open(path, "w:gz")
+    add_file(archive, "remotechromemcp-v1.2.3/compose.yaml")
+    add_file(archive, "remotechromemcp-v1.2.3/vminstall/compose.vm.yaml")
+    return archive
+
+with base_archive(os.path.join(root, "remotechromemcp-v1.2.3.tar.gz")) as archive:
+    add_file(archive, "remotechromemcp-v1.2.3/README.md")
+
+with base_archive(os.path.join(root, "absolute.tar.gz")) as archive:
+    add_file(archive, os.environ["ARCHIVE_ABSOLUTE_ESCAPE"])
+
+with base_archive(os.path.join(root, "traversal.tar.gz")) as archive:
+    add_file(archive, "remotechromemcp-v1.2.3/../../archive-escape")
+
+with base_archive(os.path.join(root, "symlink.tar.gz")) as archive:
+    info = tarfile.TarInfo("remotechromemcp-v1.2.3/vminstall/escape-link")
+    info.type = tarfile.SYMTYPE
+    info.linkname = "../../../archive-escape"
+    archive.addfile(info)
+
+with base_archive(os.path.join(root, "hardlink.tar.gz")) as archive:
+    info = tarfile.TarInfo("remotechromemcp-v1.2.3/vminstall/escape-hardlink")
+    info.type = tarfile.LNKTYPE
+    info.linkname = "../../archive-escape"
+    archive.addfile(info)
+
+with base_archive(os.path.join(root, "device.tar.gz")) as archive:
+    info = tarfile.TarInfo("remotechromemcp-v1.2.3/vminstall/device")
+    info.type = tarfile.CHRTYPE
+    info.devmajor = 1
+    info.devminor = 3
+    archive.addfile(info)
+
+with tarfile.open(os.path.join(root, "remotechromemcp-master.tar.gz"), "w:gz") as archive:
+    add_file(archive, "remotechromemcp-master/compose.yaml")
+    add_file(archive, "remotechromemcp-master/vminstall/compose.vm.yaml")
+PY
+
+(
+  cd "$release_fixture"
+  sha256sum remotechromemcp-v1.2.3.tar.gz \
+    >remotechromemcp-v1.2.3.tar.gz.sha256
+)
+for hostile_archive in absolute traversal symlink hardlink device; do
+  mkdir "$release_fixture/$hostile_archive"
+  cp "$release_fixture/$hostile_archive.tar.gz" \
+    "$release_fixture/$hostile_archive/remotechromemcp-v1.2.3.tar.gz"
+  (
+    cd "$release_fixture/$hostile_archive"
+    sha256sum remotechromemcp-v1.2.3.tar.gz \
+      >remotechromemcp-v1.2.3.tar.gz.sha256
+  )
+done
+
+REMOTE_CHROME_TEST_ROOT="$test_root" vm_init_paths
+SELECTED_VERSION=v1.2.3
+vm_stage_release "$release_fixture/remotechromemcp-v1.2.3.tar.gz"
+expected_staging="$REMOTE_CHROME_INSTALL_ROOT/releases/.staging-v1.2.3-$$"
+[[ "$STAGED_RELEASE_DIR" == "$expected_staging" && -d "$expected_staging" ]] ||
+  fail 'verified release must be extracted to the PID-scoped staging directory'
+vm_verify_release "$STAGED_RELEASE_DIR" ||
+  fail 'staged release must contain both Compose manifests'
+[[ ! -e "$(vm_release_dir)" ]] ||
+  fail 'release staging must not create or replace the final release directory'
+
+for hostile_archive in absolute traversal symlink hardlink device; do
+  rm -rf -- "$expected_staging"
+  set +e
+  (
+    SELECTED_VERSION=v1.2.3
+    vm_stage_release \
+      "$release_fixture/$hostile_archive/remotechromemcp-v1.2.3.tar.gz"
+  ) >"$test_root/$hostile_archive.stdout" \
+    2>"$test_root/$hostile_archive.stderr"
+  hostile_status=$?
+  set -e
+  [[ $hostile_status -ne 0 ]] ||
+    fail "$hostile_archive archive must be rejected"
+  [[ ! -e "$test_root/archive-escape" &&
+     ! -e "$ARCHIVE_ABSOLUTE_ESCAPE" ]] ||
+    fail "$hostile_archive archive must not escape extraction"
+  [[ ! -d "$expected_staging" ]] ||
+    fail "$hostile_archive archive must be rejected before extraction"
+done
+
+checksum_file="$release_fixture/remotechromemcp-v1.2.3.tar.gz.sha256"
+cp "$checksum_file" "$checksum_file.valid"
+printf '%064d  remotechromemcp-v1.2.3.tar.gz\n' 0 >"$checksum_file"
+rm -rf -- "$expected_staging"
+set +e
+(
+  SELECTED_VERSION=v1.2.3
+  vm_stage_release "$release_fixture/remotechromemcp-v1.2.3.tar.gz"
+) >"$test_root/checksum.stdout" 2>"$test_root/checksum.stderr"
+checksum_status=$?
+set -e
+[[ $checksum_status -ne 0 ]] ||
+  fail 'pinned release with an invalid checksum must fail'
+[[ ! -d "$expected_staging" ]] ||
+  fail 'checksum must be verified before creating the extraction staging directory'
+mv "$checksum_file.valid" "$checksum_file"
+
+sentinel="$REMOTE_CHROME_INSTALL_ROOT/releases/keep-me"
+mkdir -p "$sentinel"
+: >"$sentinel/sentinel"
+set +e
+(
+  SELECTED_VERSION=v1.2.3
+  vm_stage_release \
+    "$release_fixture/traversal/remotechromemcp-v1.2.3.tar.gz"
+) >/dev/null 2>&1
+cleanup_status=$?
+set -e
+[[ $cleanup_status -ne 0 && -f "$sentinel/sentinel" ]] ||
+  fail 'failed staging cleanup must preserve unrelated release content'
+
+SELECTED_VERSION=master
+master_log="$test_root/master.log"
+COMMAND_LOG="$master_log"
+: >"$master_log"
+vm_stage_release "$release_fixture/remotechromemcp-master.tar.gz"
+grep -Fqi unpinned "$master_log" ||
+  fail 'master staging must mark the release unpinned in logs'
+grep -Fxq 'RELEASE_VERIFICATION=unpinned' \
+  "$REMOTE_CHROME_CONFIG_ROOT/install.env" ||
+  fail 'master staging must persist its unpinned status'
+
+printf 'PASS: VM installer validation, platform, no-TTY, and release contracts\n'
