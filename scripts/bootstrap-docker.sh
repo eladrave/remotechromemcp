@@ -10,32 +10,43 @@ fail() {
 
 bootstrap_parse_args() {
   domain=
-  case "${1:-}" in
-    '')
-      return 0
-      ;;
-    --domain)
-      if (($# != 2)) || [[ -z "${2:-}" || "$2" == -* ]]; then
-        printf 'ERROR: usage: %s [--domain DOMAIN|DOMAIN]\n' \
+  acme_email="${ACME_EMAIL:-}"
+  while (($#)); do
+    case "$1" in
+      --domain)
+        if (($# < 2)) || [[ -z "${2:-}" || "$2" == -* ]]; then
+          printf 'ERROR: usage: %s [--domain DOMAIN|DOMAIN] [--email EMAIL]\n' \
+            "$(basename "${BASH_SOURCE[0]}")" >&2
+          return 64
+        fi
+        domain="$2"
+        shift 2
+        ;;
+      --email)
+        if (($# < 2)) || [[ -z "${2:-}" || "$2" == -* ]]; then
+          printf 'ERROR: usage: %s [--domain DOMAIN|DOMAIN] [--email EMAIL]\n' \
+            "$(basename "${BASH_SOURCE[0]}")" >&2
+          return 64
+        fi
+        acme_email="$2"
+        shift 2
+        ;;
+      --*)
+        printf 'ERROR: usage: %s [--domain DOMAIN|DOMAIN] [--email EMAIL]\n' \
           "$(basename "${BASH_SOURCE[0]}")" >&2
         return 64
-      fi
-      domain="$2"
-      ;;
-    --*)
-      printf 'ERROR: usage: %s [--domain DOMAIN|DOMAIN]\n' \
-        "$(basename "${BASH_SOURCE[0]}")" >&2
-      return 64
-      ;;
-    *)
-      if (($# != 1)); then
-        printf 'ERROR: usage: %s [--domain DOMAIN|DOMAIN]\n' \
-          "$(basename "${BASH_SOURCE[0]}")" >&2
-        return 64
-      fi
-      domain="$1"
-      ;;
-  esac
+        ;;
+      *)
+        if [[ -n "$domain" ]]; then
+          printf 'ERROR: usage: %s [--domain DOMAIN|DOMAIN] [--email EMAIL]\n' \
+            "$(basename "${BASH_SOURCE[0]}")" >&2
+          return 64
+        fi
+        domain="$1"
+        shift
+        ;;
+    esac
+  done
 }
 
 wait_for_service_health() {
@@ -92,6 +103,12 @@ bootstrap_main() {
   [[ "$domain" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] ||
     fail 'Domain must be a hostname without a scheme, path, or port'
 
+  if [[ -z "$acme_email" ]]; then
+    read -r -p 'Certificate email: ' acme_email </dev/tty
+  fi
+  [[ $acme_email =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]] ||
+    fail 'Certificate email is invalid'
+
   login_username="${LOGIN_USERNAME:-remotechrome}"
   [[ "$login_username" =~ ^[A-Za-z0-9._-]+$ ]] ||
     fail 'LOGIN_USERNAME contains unsupported characters'
@@ -118,6 +135,7 @@ bootstrap_main() {
   install -m 600 /dev/null "$env_file"
   {
     printf 'DOMAIN=%s\n' "$domain"
+    printf 'ACME_EMAIL=%s\n' "$acme_email"
     printf 'MCP_TOKEN=%s\n' "$mcp_token"
     printf 'LOGIN_USERNAME=%s\n' "$login_username"
     printf "LOGIN_PASSWORD_HASH='%s'\n" "$login_password_hash"

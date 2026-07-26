@@ -28,6 +28,7 @@ services:
     image: caddy:2-alpine
     environment:
       DOMAIN: ${DOMAIN:?set DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL}
       MCP_TOKEN: ${MCP_TOKEN:?set MCP_TOKEN}
       LOGIN_USERNAME: ${LOGIN_USERNAME:?set LOGIN_USERNAME}
       LOGIN_PASSWORD_HASH: ${LOGIN_PASSWORD_HASH:?set LOGIN_PASSWORD_HASH}

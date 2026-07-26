@@ -1,0 +1,14 @@
+services:
+  browser:
+    volumes:
+      - type: bind
+        source: ${REMOTE_CHROME_DATA_DIR:?set REMOTE_CHROME_DATA_DIR}/profile
+        target: /data/chrome-profile
+  proxy:
+    volumes:
+      - type: bind
+        source: ${REMOTE_CHROME_DATA_DIR:?set REMOTE_CHROME_DATA_DIR}/caddy-data
+        target: /data
+      - type: bind
+        source: ${REMOTE_CHROME_DATA_DIR:?set REMOTE_CHROME_DATA_DIR}/caddy-config
+        target: /config

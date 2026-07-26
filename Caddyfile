@@ -1,3 +1,7 @@
+{
+	email {$ACME_EMAIL}
+}
+
 http://{$DOMAIN} {
 	handle /healthz {
 		respond "ready" 200

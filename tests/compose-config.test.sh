@@ -41,6 +41,7 @@ expected_hash='$2a$12$abcdefghijklmnopqrstuuABCDEFGHIJKLMNOPQRSTUVWXYZ01234'
 cp .env.example "$env_file"
 sed -i \
   -e 's/^DOMAIN=.*/DOMAIN=chrome.example.test/' \
+  -e 's/^ACME_EMAIL=.*/ACME_EMAIL=admin@example.test/' \
   -e 's/^MCP_TOKEN=.*/MCP_TOKEN=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/' \
   -e 's/^LOGIN_USERNAME=.*/LOGIN_USERNAME=testoperator/' \
   -e "s|^LOGIN_PASSWORD_HASH=.*|LOGIN_PASSWORD_HASH='$expected_hash'|" \

@@ -57,6 +57,7 @@ trap cleanup EXIT
 
 {
   printf 'DOMAIN=localhost\n'
+  printf 'ACME_EMAIL=admin@example.test\n'
   printf 'MCP_TOKEN=%s\n' "$MCP_TOKEN"
   printf 'LOGIN_USERNAME=%s\n' "$LOGIN_USERNAME"
   printf '%s\n' \
