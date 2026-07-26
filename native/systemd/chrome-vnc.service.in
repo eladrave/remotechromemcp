@@ -1,0 +1,13 @@
+[Unit]
+Description=Loopback VNC for remote Chrome
+Requires=chrome-display.service
+After=chrome-display.service
+
+[Service]
+Type=simple
+ExecStart=x11vnc -display :@DISPLAY_NUMBER@ -rfbport @VNC_PORT@ -localhost -forever -shared -nopw
+Restart=on-failure
+RestartSec=3s
+
+[Install]
+WantedBy=multi-user.target

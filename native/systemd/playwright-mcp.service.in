@@ -1,0 +1,16 @@
+[Unit]
+Description=Playwright MCP attached to headed Chrome
+Requires=chrome-mcp.service
+After=chrome-mcp.service
+
+[Service]
+Type=simple
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=NODE_OPTIONS=--require=@PROJECT_DIR@/lib/inject-instructions.cjs
+ExecStart=@PLAYWRIGHT_MCP_BIN@ --cdp-endpoint http://127.0.0.1:@CDP_PORT@ --host 127.0.0.1 --port @MCP_INTERNAL_PORT@ --shared-browser-context --cdp-timeout 10000
+Restart=on-failure
+RestartSec=5s
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

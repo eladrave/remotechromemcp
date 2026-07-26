@@ -1,0 +1,13 @@
+[Unit]
+Description=Remote Chrome virtual display
+Wants=network.target
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=Xvfb :@DISPLAY_NUMBER@ -screen 0 @SCREEN_GEOMETRY@ -nolisten tcp
+Restart=on-failure
+RestartSec=3s
+
+[Install]
+WantedBy=multi-user.target

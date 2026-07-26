@@ -1,0 +1,14 @@
+[Unit]
+Description=Loopback noVNC for remote Chrome
+Requires=chrome-vnc.service
+After=chrome-vnc.service
+
+[Service]
+Type=simple
+ExecStart=websockify --web=/usr/share/novnc/ 127.0.0.1:@NOVNC_PORT@ 127.0.0.1:@VNC_PORT@
+Restart=on-failure
+RestartSec=3s
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

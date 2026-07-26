@@ -1,0 +1,15 @@
+[Unit]
+Description=Headed Chrome for remote MCP
+Requires=chrome-display.service chrome-window-manager.service
+After=chrome-display.service chrome-window-manager.service
+
+[Service]
+Type=simple
+Environment=DISPLAY=:@DISPLAY_NUMBER@
+ExecStartPre=/bin/sh -c 'rm -f "@PROFILE_DIR@"/Singleton*'
+ExecStart=@CHROME_BIN@ --display=:@DISPLAY_NUMBER@ --remote-debugging-port=@CDP_PORT@ --remote-debugging-address=127.0.0.1 --user-data-dir=@PROFILE_DIR@ --no-first-run --no-default-browser-check --disable-dev-shm-usage
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
