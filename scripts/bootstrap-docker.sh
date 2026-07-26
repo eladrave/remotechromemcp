@@ -130,12 +130,15 @@ bootstrap_main() {
     fail 'Caddy password hash contains a newline or single quote'
   fi
 
+  acme_email_dotenv="${acme_email//\\/\\\\}"
+  acme_email_dotenv="${acme_email_dotenv//\'/\\\'}"
+
   env_file="$repo_dir/.env"
   umask 077
   install -m 600 /dev/null "$env_file"
   {
     printf 'DOMAIN=%s\n' "$domain"
-    printf 'ACME_EMAIL=%s\n' "$acme_email"
+    printf "ACME_EMAIL='%s'\n" "$acme_email_dotenv"
     printf 'MCP_TOKEN=%s\n' "$mcp_token"
     printf 'LOGIN_USERNAME=%s\n' "$login_username"
     printf "LOGIN_PASSWORD_HASH='%s'\n" "$login_password_hash"

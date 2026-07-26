@@ -26,12 +26,15 @@ grep -Fq '/config' vminstall/compose.vm.yaml ||
 
 if command -v docker >/dev/null 2>&1 &&
    docker compose version >/dev/null 2>&1; then
-  env_file="$(mktemp)"
-  trap 'rm -f "$env_file"' EXIT
+  tmp_dir="$(mktemp -d)"
+  trap 'rm -rf "$tmp_dir"' EXIT
+  env_file="$tmp_dir/compose.env"
+  rendered_json="$tmp_dir/compose.json"
   hash='$2a$14$TRf6ynPaHFGoGIzGbRPBMumKVsUbVexXBXaVlsN0t6s/6MwOe5FMe'
+  acme_email='ops$tag@example.com'
   {
     printf 'DOMAIN=chrome.example.com\n'
-    printf 'ACME_EMAIL=admin@example.com\n'
+    printf "ACME_EMAIL='%s'\n" "$acme_email"
     printf 'MCP_TOKEN=%s\n' "$(printf 'a%.0s' {1..64})"
     printf 'LOGIN_USERNAME=remotechrome\n'
     printf "LOGIN_PASSWORD_HASH='%s'\n" "$hash"
@@ -40,7 +43,83 @@ if command -v docker >/dev/null 2>&1 &&
     printf 'REMOTE_CHROME_DATA_DIR=/var/lib/remote-chrome\n'
   } >"$env_file"
   docker compose -f compose.yaml -f vminstall/compose.vm.yaml \
-    --env-file "$env_file" config >/dev/null
+    --env-file "$env_file" config --format json >"$rendered_json"
+
+  CONFIG_JSON="$rendered_json" \
+    REPO_DIR="$repo_dir" \
+    EXPECTED_ACME_EMAIL="$acme_email" \
+    node <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const assert = require('node:assert/strict');
+
+const config = JSON.parse(fs.readFileSync(process.env.CONFIG_JSON, 'utf8'));
+const services = config.services || {};
+const browser = services.browser;
+const proxy = services.proxy;
+
+assert(browser, 'rendered VM Compose config must contain the browser service');
+assert(proxy, 'rendered VM Compose config must contain the proxy service');
+
+function assertMount(service, target, source, readOnly = false) {
+  const matches = (service.volumes || []).filter(volume => volume.target === target);
+  assert.equal(matches.length, 1, `expected exactly one mount at ${target}`);
+  assert.equal(matches[0].type, 'bind', `${target} must be a bind mount`);
+  assert.equal(matches[0].source, source, `${target} has the wrong bind source`);
+  if (readOnly)
+    assert.equal(matches[0].read_only, true, `${target} must remain read-only`);
+}
+
+assertMount(
+  browser,
+  '/data/chrome-profile',
+  '/var/lib/remote-chrome/profile'
+);
+assertMount(proxy, '/data', '/var/lib/remote-chrome/caddy-data');
+assertMount(proxy, '/config', '/var/lib/remote-chrome/caddy-config');
+assertMount(
+  proxy,
+  '/etc/caddy/Caddyfile',
+  path.join(process.env.REPO_DIR, 'Caddyfile'),
+  true
+);
+
+assert(
+  !browser.ports || browser.ports.length === 0,
+  'browser must not publish host ports'
+);
+assert.deepEqual(
+  [...(browser.expose || [])].map(String).sort(),
+  ['6080', '8931'],
+  'browser must expose only ports 6080 and 8931'
+);
+
+assert.equal(proxy.ports?.length, 2, 'proxy must publish exactly two ports');
+const proxyPorts = proxy.ports.map(port => ({
+  hostIp: port.host_ip,
+  published: String(port.published),
+  target: String(port.target),
+}));
+assert.deepEqual(
+  proxyPorts.sort((left, right) => left.published.localeCompare(right.published)),
+  [
+    { hostIp: '0.0.0.0', published: '443', target: '443' },
+    { hostIp: '0.0.0.0', published: '80', target: '80' },
+  ],
+  'proxy must publish only 0.0.0.0:80:80 and 0.0.0.0:443:443'
+);
+
+assert.equal(
+  proxy.environment?.ACME_EMAIL,
+  process.env.EXPECTED_ACME_EMAIL,
+  'proxy ACME_EMAIL must survive dotenv and Compose interpolation literally'
+);
+NODE
+
+  printf 'PASS: rendered VM Compose semantics\n'
 else
+  if [[ -v CI ]]; then
+    fail 'Docker Compose unavailable in CI'
+  fi
   printf 'SKIP: Docker Compose unavailable; rendered overlay checked in CI\n'
 fi

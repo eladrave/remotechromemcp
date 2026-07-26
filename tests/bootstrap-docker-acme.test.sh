@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_dir"
+
+fail() {
+  printf 'FAIL: %s\n' "$*" >&2
+  exit 1
+}
+
+tmp_dir="$(mktemp -d)"
+trap 'rm -rf "$tmp_dir"' EXIT
+test_repo="$tmp_dir/repo"
+fake_bin="$tmp_dir/bin"
+mkdir -p "$test_repo/scripts" "$fake_bin"
+cp scripts/bootstrap-docker.sh "$test_repo/scripts/bootstrap-docker.sh"
+
+cat >"$fake_bin/openssl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "$*" in
+  'rand -hex 32')
+    printf 'a%.0s' {1..64}
+    printf '\n'
+    ;;
+  'rand -base64 36')
+    printf 'b%.0s' {1..48}
+    printf '\n'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+EOF
+
+cat >"$fake_bin/docker" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "${1:-}" in
+  compose)
+    shift
+    if [[ "${1:-}" == version ]]; then
+      exit 0
+    fi
+    if [[ " $* " == *" config "* ]]; then
+      exit 71
+    fi
+    exit 1
+    ;;
+  info)
+    exit 0
+    ;;
+  run)
+    printf '%s\n' '$2a$14$TRf6ynPaHFGoGIzGbRPBMumKVsUbVexXBXaVlsN0t6s/6MwOe5FMe'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+EOF
+chmod +x "$fake_bin/docker" "$fake_bin/openssl"
+
+run_until_compose_config() {
+  local status
+  set +e
+  PATH="$fake_bin:$PATH" \
+    bash "$test_repo/scripts/bootstrap-docker.sh" "$@" \
+    >"$tmp_dir/bootstrap.stdout" 2>"$tmp_dir/bootstrap.stderr"
+  status=$?
+  set -e
+  [[ "$status" == 71 ]] ||
+    fail "bootstrap must reach Compose config, got status $status"
+}
+
+assert_email_line() {
+  local expected="$1"
+  grep -Fqx "$expected" "$test_repo/.env" ||
+    fail "bootstrap wrote an unsafe or incorrect ACME email: expected $expected"
+}
+
+run_until_compose_config \
+  --domain chrome.example.test \
+  --email 'ops$tag@example.com'
+assert_email_line "ACME_EMAIL='ops\$tag@example.com'"
+
+set +e
+ACME_EMAIL=env@example.test PATH="$fake_bin:$PATH" \
+  bash "$test_repo/scripts/bootstrap-docker.sh" --domain chrome.example.test \
+  >"$tmp_dir/env.stdout" 2>"$tmp_dir/env.stderr"
+env_status=$?
+set -e
+[[ "$env_status" == 71 ]] ||
+  fail "environment email must reach Compose config, got status $env_status"
+assert_email_line "ACME_EMAIL='env@example.test'"
+
+set +e
+ACME_EMAIL=env@example.test PATH="$fake_bin:$PATH" \
+  bash "$test_repo/scripts/bootstrap-docker.sh" \
+    --domain chrome.example.test --email cli@example.test \
+  >"$tmp_dir/override.stdout" 2>"$tmp_dir/override.stderr"
+override_status=$?
+set -e
+[[ "$override_status" == 71 ]] ||
+  fail "CLI email override must reach Compose config, got status $override_status"
+assert_email_line "ACME_EMAIL='cli@example.test'"
+
+set +e
+printf 'tty@example.test\n' |
+  env PATH="$fake_bin:$PATH" \
+    script -qefc \
+      "bash '$test_repo/scripts/bootstrap-docker.sh' --domain chrome.example.test" \
+      /dev/null >"$tmp_dir/tty.stdout" 2>"$tmp_dir/tty.stderr"
+tty_status=$?
+set -e
+[[ "$tty_status" == 71 ]] ||
+  fail "TTY-prompted email must reach Compose config, got status $tty_status"
+assert_email_line "ACME_EMAIL='tty@example.test'"
+
+set +e
+PATH="$fake_bin:$PATH" \
+  bash "$test_repo/scripts/bootstrap-docker.sh" \
+    --domain chrome.example.test --email invalid \
+  >"$tmp_dir/invalid.stdout" 2>"$tmp_dir/invalid.stderr"
+invalid_status=$?
+set -e
+[[ "$invalid_status" == 1 ]] ||
+  fail "invalid email must be rejected before Compose, got status $invalid_status"
+grep -Fq 'ERROR: Certificate email is invalid' "$tmp_dir/invalid.stderr" ||
+  fail 'invalid email must report the certificate email validation error'
+
+printf 'PASS: Docker bootstrap ACME email inputs and dotenv serialization\n'
