@@ -1,0 +1,19 @@
+[Unit]
+Description=Remote Chrome MCP Docker Compose
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/remotechromemcp/current
+EnvironmentFile=/etc/remote-chrome/install.env
+ExecStart=/usr/bin/docker compose -f compose.yaml -f vminstall/compose.vm.yaml --env-file /etc/remote-chrome/compose.env up -d
+ExecStartPost=/usr/local/sbin/remote-chrome wait-ready
+ExecStop=/usr/bin/docker compose -f compose.yaml -f vminstall/compose.vm.yaml --env-file /etc/remote-chrome/compose.env down
+TimeoutStartSec=300
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

@@ -258,6 +258,13 @@ declare -F vm_stage_release >/dev/null ||
   fail 'vm_stage_release is undefined'
 declare -F vm_verify_release >/dev/null ||
   fail 'vm_verify_release is undefined'
+for management_function in \
+  vm_prepare_config vm_generate_credentials vm_render_compose_env \
+  vm_activate_release vm_rollback_release vm_verify_public_stack \
+  vm_print_connection_handoff; do
+  declare -F "$management_function" >/dev/null ||
+    fail "$management_function is undefined"
+done
 
 release_fixture="$test_root/release-fixtures"
 mkdir "$release_fixture"

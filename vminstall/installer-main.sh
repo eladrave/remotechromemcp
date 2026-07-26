@@ -12,6 +12,10 @@ source "$installer_dir/lib/host.sh"
 source "$installer_dir/lib/docker.sh"
 # shellcheck source=lib/release.sh
 source "$installer_dir/lib/release.sh"
+# shellcheck source=lib/config.sh
+source "$installer_dir/lib/config.sh"
+# shellcheck source=lib/activate.sh
+source "$installer_dir/lib/activate.sh"
 
 vm_installer_main() {
   vm_parse_args "$@" || return $?
@@ -33,7 +37,10 @@ vm_installer_main() {
     vm_die 66 'Release verification or staging failed'
   vm_verify_release "$STAGED_RELEASE_DIR" ||
     vm_die 66 'Staged release is incomplete'
-  vm_log 'Verified release staged; release activation has not started'
+  vm_activate_release ||
+    vm_die $? 'Release activation failed; prior release recovery was attempted'
+  vm_print_connection_handoff ||
+    vm_die 74 'Release activated, but connection handoff could not be written'
 }
 
 if [[ ${REMOTE_CHROME_SKIP_MAIN:-0} != 1 ]]; then
