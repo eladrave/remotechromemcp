@@ -108,6 +108,9 @@ bootstrap_main() {
   fi
   [[ $acme_email =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]] ||
     fail 'Certificate email is invalid'
+  if [[ "$acme_email" == *"'"* || "$acme_email" == *"\\"* ]]; then
+    fail 'Certificate email contains unsupported characters'
+  fi
 
   login_username="${LOGIN_USERNAME:-remotechrome}"
   [[ "$login_username" =~ ^[A-Za-z0-9._-]+$ ]] ||
@@ -130,15 +133,12 @@ bootstrap_main() {
     fail 'Caddy password hash contains a newline or single quote'
   fi
 
-  acme_email_dotenv="${acme_email//\\/\\\\}"
-  acme_email_dotenv="${acme_email_dotenv//\'/\\\'}"
-
   env_file="$repo_dir/.env"
   umask 077
   install -m 600 /dev/null "$env_file"
   {
     printf 'DOMAIN=%s\n' "$domain"
-    printf "ACME_EMAIL='%s'\n" "$acme_email_dotenv"
+    printf "ACME_EMAIL='%s'\n" "$acme_email"
     printf 'MCP_TOKEN=%s\n' "$mcp_token"
     printf 'LOGIN_USERNAME=%s\n' "$login_username"
     printf "LOGIN_PASSWORD_HASH='%s'\n" "$login_password_hash"

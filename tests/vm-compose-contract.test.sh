@@ -109,10 +109,12 @@ assert.deepEqual(
   'proxy must publish only 0.0.0.0:80:80 and 0.0.0.0:443:443'
 );
 
-assert.equal(
-  proxy.environment?.ACME_EMAIL,
-  process.env.EXPECTED_ACME_EMAIL,
-  'proxy ACME_EMAIL must survive dotenv and Compose interpolation literally'
+const renderedAcmeEmail = proxy.environment?.ACME_EMAIL;
+const decodedAcmeEmail = renderedAcmeEmail?.replace(/\$\$/g, '$');
+assert(
+  renderedAcmeEmail === process.env.EXPECTED_ACME_EMAIL ||
+    decodedAcmeEmail === process.env.EXPECTED_ACME_EMAIL,
+  'proxy ACME_EMAIL must preserve the expected literal or Compose-canonical value'
 );
 NODE
 

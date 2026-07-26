@@ -86,6 +86,36 @@ run_until_compose_config \
   --email 'ops$tag@example.com'
 assert_email_line "ACME_EMAIL='ops\$tag@example.com'"
 
+if [[ -n "${STANDALONE_COMPOSE:-}" ]]; then
+  [[ -x "$STANDALONE_COMPOSE" ]] ||
+    fail "standalone Compose is not executable: $STANDALONE_COMPOSE"
+  rendered_json="$tmp_dir/bootstrap-compose.json"
+  REMOTE_CHROME_DATA_DIR=/var/lib/remote-chrome \
+    "$STANDALONE_COMPOSE" \
+      -f "$repo_dir/compose.yaml" \
+      -f "$repo_dir/vminstall/compose.vm.yaml" \
+      --env-file "$test_repo/.env" \
+      config --format json >"$rendered_json"
+  CONFIG_JSON="$rendered_json" node <<'NODE'
+const fs = require('node:fs');
+const assert = require('node:assert/strict');
+
+const config = JSON.parse(fs.readFileSync(process.env.CONFIG_JSON, 'utf8'));
+const renderedEmail = config.services?.proxy?.environment?.ACME_EMAIL;
+assert(
+  renderedEmail === 'ops$tag@example.com' ||
+    renderedEmail?.replace(/\$\$/g, '$') === 'ops$tag@example.com',
+  'standalone Compose must preserve the bootstrap-generated ACME email'
+);
+NODE
+  printf 'PASS: standalone Compose preserves bootstrap ACME email\n'
+fi
+
+run_until_compose_config \
+  --domain chrome.example.test \
+  --email person+alerts@example.test
+assert_email_line "ACME_EMAIL='person+alerts@example.test'"
+
 set +e
 ACME_EMAIL=env@example.test PATH="$fake_bin:$PATH" \
   bash "$test_repo/scripts/bootstrap-docker.sh" --domain chrome.example.test \
@@ -118,6 +148,31 @@ set -e
 [[ "$tty_status" == 71 ]] ||
   fail "TTY-prompted email must reach Compose config, got status $tty_status"
 assert_email_line "ACME_EMAIL='tty@example.test'"
+
+assert_unsupported_email() {
+  local email="$1"
+  local status
+  rm -f "$test_repo/.env"
+  set +e
+  PATH="$fake_bin:$PATH" \
+    bash "$test_repo/scripts/bootstrap-docker.sh" \
+      --domain chrome.example.test --email "$email" \
+    >"$tmp_dir/unsupported.stdout" 2>"$tmp_dir/unsupported.stderr"
+  status=$?
+  set -e
+  [[ "$status" == 1 ]] ||
+    fail "unsupported email must be rejected before Compose, got status $status"
+  grep -Fq \
+    'ERROR: Certificate email contains unsupported characters' \
+    "$tmp_dir/unsupported.stderr" ||
+    fail 'unsupported email must report the unsupported-character boundary'
+  [[ ! -e "$test_repo/.env" ]] ||
+    fail 'unsupported email must be rejected before the environment file is written'
+}
+
+assert_unsupported_email "ops'quote@example.com"
+assert_unsupported_email 'ops\tag@example.com'
+assert_unsupported_email "ops\\'combined@example.com"
 
 set +e
 PATH="$fake_bin:$PATH" \
