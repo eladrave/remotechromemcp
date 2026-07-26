@@ -1,0 +1,10 @@
+{
+  "name": "remote-chrome-mcp-deployment",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/*.test.cjs && bash tests/playbook-contract.test.sh"
+  },
+  "devDependencies": {
+    "@playwright/mcp": "0.0.78"
+  }
+}
