@@ -41,8 +41,7 @@ mcp_code="$(
 )"
 [[ "$mcp_code" == 200 ]]
 mcp_session_id="$(
-  awk 'BEGIN { IGNORECASE=1 }
-    /^Mcp-Session-Id:/ {
+  awk 'tolower($0) ~ /^mcp-session-id:/ {
       sub(/^[^:]+:[[:space:]]*/, "")
       sub(/\r$/, "")
       print

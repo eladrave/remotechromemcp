@@ -44,6 +44,9 @@ fi
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 mkdir -p "$tmp_dir/bin" "$tmp_dir/runtime"
+mawk_bin="$(command -v mawk || true)"
+[[ -n "$mawk_bin" ]] || fail 'mawk is required for Debian-compatible header parsing coverage'
+ln -s "$mawk_bin" "$tmp_dir/bin/awk"
 
 cat >"$tmp_dir/bin/jq" <<'EOF'
 #!/usr/bin/env bash
@@ -107,7 +110,7 @@ case "$url" in
     ;;
   *:8931/mcp)
     if [[ "$method" == POST ]]; then
-      [[ -n "$headers" ]] && printf 'HTTP/1.1 200 OK\r\nMcp-Session-Id: cleanup-session\r\nContent-Type: application/json\r\n\r\n' >"$headers"
+      [[ -n "$headers" ]] && printf 'HTTP/1.1 200 OK\r\nmcp-session-id: cleanup-session\r\ncontent-type: application/json\r\n\r\n' >"$headers"
       [[ -n "$output" ]] && printf '%s' '{"result":{"instructions":"REMOTE_CHROME_PLAYBOOK_VERSION=1"}}' >"$output"
       [[ -n "$write_out" ]] && printf '200'
     elif [[ "$method" == DELETE ]]; then
@@ -126,13 +129,26 @@ esac
 EOF
 chmod +x "$tmp_dir/bin/curl" "$tmp_dir/bin/jq"
 
-FAKE_CURL_LOG="$tmp_dir/curl.log" \
-REMOTE_CHROME_RUNTIME_DIR="$tmp_dir/runtime" \
-PATH="$tmp_dir/bin:$PATH" \
-  bash docker/healthcheck.sh
+if ! FAKE_CURL_LOG="$tmp_dir/curl.log" \
+  REMOTE_CHROME_RUNTIME_DIR="$tmp_dir/runtime" \
+  PATH="$tmp_dir/bin:$PATH" \
+  bash docker/healthcheck.sh; then
+  fail 'health check must parse lowercase mcp-session-id with Debian mawk'
+fi
 grep -q '^DELETE http://127\.0\.0\.1:8931/mcp session=cleanup-session$' \
   "$tmp_dir/curl.log" ||
   fail 'recurring health check must close its initialized MCP session'
+
+for file in \
+  docker/healthcheck.sh \
+  scripts/bootstrap-docker.sh \
+  tests/compose-smoke.test.sh; do
+  if grep -q 'IGNORECASE' "$file"; then
+    fail "$file must not rely on GNU awk IGNORECASE"
+  fi
+  assert_contains "$file" 'tolower\(\$0\).*mcp-session-id' \
+    "$file must match lowercase MCP session headers portably"
+done
 
 assert_contains compose.yaml \
   '\$\{PROXY_BIND_ADDRESS:-0\.0\.0\.0\}:\$\{PROXY_HTTP_PORT:-80\}:80' \

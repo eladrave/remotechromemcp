@@ -69,8 +69,7 @@ wait_for_service_health() {
 }
 
 extract_mcp_session_id() {
-  awk 'BEGIN { IGNORECASE=1 }
-    /^Mcp-Session-Id:/ {
+  awk 'tolower($0) ~ /^mcp-session-id:/ {
       sub(/^[^:]+:[[:space:]]*/, "")
       sub(/\r$/, "")
       print

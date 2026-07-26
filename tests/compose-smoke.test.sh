@@ -201,8 +201,7 @@ initialize_and_close() {
   )"
   [[ "$code" == 200 ]] || fail "public initialize expected 200, got $code"
   session_id="$(
-    awk 'BEGIN { IGNORECASE=1 }
-      /^Mcp-Session-Id:/ {
+    awk 'tolower($0) ~ /^mcp-session-id:/ {
         sub(/^[^:]+:[[:space:]]*/, "")
         sub(/\r$/, "")
         print
@@ -218,8 +217,8 @@ initialize_and_close() {
   grep -q 'REMOTE_CHROME_PLAYBOOK_VERSION=1' "$body" ||
     fail 'public initialize response is missing playbook instructions'
   content_type_count="$(
-    awk 'BEGIN { IGNORECASE=1; count=0 }
-      /^Content-Type:/ { count += 1 }
+    awk 'BEGIN { count=0 }
+      tolower($0) ~ /^content-type:/ { count += 1 }
       END { print count }' "$headers"
   )"
   [[ "$content_type_count" == 1 ]] ||
