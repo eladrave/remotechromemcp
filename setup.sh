@@ -227,6 +227,160 @@ else
 fi
 
 ##############################################################################
+# 10. HTTPS setup with Let's Encrypt (optional)
+##############################################################################
+echo ""
+echo "════════════════════════════════════════════════════════"
+echo "  HTTPS Setup (Let's Encrypt)"
+echo "════════════════════════════════════════════════════════"
+echo ""
+read -rp "Set up HTTPS with a free Let's Encrypt certificate? [Y/n]: " _HTTPS_CHOICE
+_HTTPS_CHOICE="${_HTTPS_CHOICE:-Y}"
+
+ENDPOINT="http://${PUBLIC_IP}:${MCP_PUBLIC_PORT}/mcp"
+DOMAIN=""
+
+if [[ "${_HTTPS_CHOICE^^}" == "Y" ]]; then
+
+  # --- Domain ---
+  echo ""
+  read -rp "  Domain/subdomain for the MCP endpoint (e.g. chrome.example.com): " DOMAIN
+  if [[ -z "$DOMAIN" ]]; then
+    warn "No domain entered — skipping HTTPS setup."
+  else
+
+    # --- Email for Let's Encrypt ---
+    read -rp "  Email address for Let's Encrypt renewal notices: " CERTBOT_EMAIL
+    if [[ -z "$CERTBOT_EMAIL" ]]; then
+      warn "No email entered — skipping HTTPS setup."
+      DOMAIN=""
+    fi
+  fi
+fi
+
+if [[ -n "$DOMAIN" ]]; then
+
+  # --- DNS A record instructions ---
+  echo ""
+  echo "  ── DNS Setup ────────────────────────────────────────────"
+  echo "  You need an A record pointing ${DOMAIN} → ${PUBLIC_IP}"
+  echo ""
+  echo "  Provider-specific instructions:"
+  echo ""
+  echo "  Cloudflare"
+  echo "    1. Log in → select your domain"
+  echo "    2. DNS → Records → Add record"
+  echo "    3. Type: A  |  Name: ${DOMAIN%%.*}  |  IPv4: ${PUBLIC_IP}"
+  echo "    4. Proxy status: DNS only (grey cloud)  ←  important!"
+  echo ""
+  echo "  AWS Route 53"
+  echo "    1. Hosted Zones → your zone → Create record"
+  echo "    2. Record name: ${DOMAIN%%.*}  |  Type: A  |  Value: ${PUBLIC_IP}"
+  echo ""
+  echo "  GoDaddy / Namecheap / other registrars"
+  echo "    DNS Management → Add → Type: A"
+  echo "    Host/Name: ${DOMAIN%%.*}  |  Points to: ${PUBLIC_IP}  |  TTL: 600"
+  echo ""
+  echo "  ─────────────────────────────────────────────────────────"
+  read -rp "  Press Enter once the A record is saved and you're ready to continue..."
+
+  # --- DNS propagation check ---
+  info "Checking DNS for ${DOMAIN}..."
+  RESOLVED=$(dig +short "${DOMAIN}" A 2>/dev/null | head -1 || true)
+  if [[ "$RESOLVED" == "$PUBLIC_IP" ]]; then
+    success "DNS resolved: ${DOMAIN} → ${RESOLVED} ✓"
+  else
+    warn "${DOMAIN} currently resolves to '${RESOLVED}' (expected '${PUBLIC_IP}')."
+    warn "DNS may not have propagated yet (can take a few minutes)."
+    echo ""
+    read -rp "  Continue anyway and attempt certificate issuance? [y/N]: " _DNS_SKIP
+    if [[ "${_DNS_SKIP^^}" != "Y" ]]; then
+      warn "Skipping HTTPS. Re-run setup.sh once DNS has propagated."
+      DOMAIN=""
+    fi
+  fi
+fi
+
+if [[ -n "$DOMAIN" ]]; then
+
+  # --- Install certbot if needed ---
+  if ! command -v certbot &>/dev/null; then
+    info "Installing certbot..."
+    sudo apt-get install -y certbot python3-certbot-nginx
+    success "certbot installed."
+  else
+    success "certbot already installed."
+  fi
+
+  # --- Obtain certificate ---
+  info "Requesting Let's Encrypt certificate for ${DOMAIN}..."
+  sudo certbot certonly --nginx \
+    -d "${DOMAIN}" \
+    --non-interactive \
+    --agree-tos \
+    -m "${CERTBOT_EMAIL}" \
+    --no-eff-email
+  success "Certificate obtained — valid 90 days, auto-renews via certbot systemd timer."
+
+  # --- Rewrite nginx config for HTTPS ---
+  info "Updating nginx for HTTPS on port 443..."
+
+  sudo tee "$NGINX_SITE" > /dev/null << NGINXEOF
+map \$http_authorization \$mcp_auth_ok {
+    "Bearer ${BEARER_TOKEN}" 1;
+    default                  0;
+}
+
+# HTTP → HTTPS redirect
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${DOMAIN};
+
+    location /.well-known/acme-challenge/ { root /var/www/html; }
+    location / { return 301 https://\$host\$request_uri; }
+}
+
+# HTTPS — MCP endpoint
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name ${DOMAIN};
+
+    ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
+
+    location / {
+        if (\$mcp_auth_ok = 0) {
+            return 401 '{"error":"Unauthorized"}';
+        }
+
+        proxy_pass         http://127.0.0.1:${MCP_INTERNAL_PORT};
+        proxy_http_version 1.1;
+
+        proxy_set_header   Host "localhost:${MCP_INTERNAL_PORT}";
+        proxy_set_header   Connection "";
+        proxy_set_header   X-Real-IP \$remote_addr;
+        proxy_buffering    off;
+        proxy_cache        off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+
+        add_header Content-Type application/json always;
+    }
+}
+NGINXEOF
+
+  sudo nginx -t
+  sudo systemctl reload nginx
+  success "nginx updated for HTTPS."
+
+  ENDPOINT="https://${DOMAIN}/mcp"
+fi
+
+##############################################################################
 # Summary
 ##############################################################################
 echo ""
@@ -234,16 +388,20 @@ echo "════════════════════════�
 echo "  Remote Chrome MCP — Setup Complete"
 echo "════════════════════════════════════════════════════════"
 echo ""
-echo "  MCP endpoint : http://${PUBLIC_IP}:${MCP_PUBLIC_PORT}/mcp"
+echo "  MCP endpoint : ${ENDPOINT}"
 echo "  Bearer token : ${BEARER_TOKEN}"
 echo ""
 echo "  Token file   : ${TOKEN_FILE}"
+if [[ -n "$DOMAIN" ]]; then
+echo "  TLS cert     : /etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
+echo "  Auto-renews  : yes (certbot.timer)"
+fi
 echo ""
 echo "  Client config snippet:"
 echo '  {'
 echo '    "mcpServers": {'
 echo '      "playwright": {'
-echo "        \"url\": \"http://${PUBLIC_IP}:${MCP_PUBLIC_PORT}/mcp\","
+echo "        \"url\": \"${ENDPOINT}\","
 echo '        "headers": {'
 echo "          \"Authorization\": \"Bearer ${BEARER_TOKEN}\""
 echo '        }'
