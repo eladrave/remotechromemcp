@@ -27,6 +27,14 @@ status_label() {
   fi
 }
 
+is_jsonrpc_initialize_result() {
+  local payload=$1
+  [[ "$payload" =~ \"jsonrpc\"[[:space:]]*:[[:space:]]*\"2\.0\" ]] &&
+    [[ "$payload" =~ \"id\"[[:space:]]*:[[:space:]]*1 ]] &&
+    [[ "$payload" =~ \"result\"[[:space:]]*:[[:space:]]*\{ ]] &&
+    [[ ! "$payload" =~ \"error\"[[:space:]]*: ]]
+}
+
 printf 'Remote Chrome MCP status\n\n'
 printf 'User services:\n'
 for unit in "${units[@]}"; do
@@ -56,13 +64,13 @@ else
 fi
 
 printf '\nPlaywright MCP initialize:\n'
-mcp_response=$(curl --silent --show-error --max-time 10 \
-  -X POST \
-  -H 'Content-Type: application/json' \
-  -H 'Accept: application/json, text/event-stream' \
-  "http://127.0.0.1:${mcp_port}/mcp" \
-  -d "$initialize_payload" 2>/dev/null || true)
-if [[ -n "$mcp_response" ]]; then
+if mcp_response=$(curl --fail-with-body --silent --show-error --max-time 10 \
+    -X POST \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    "http://127.0.0.1:${mcp_port}/mcp" \
+    -d "$initialize_payload" 2>/dev/null) &&
+  is_jsonrpc_initialize_result "$mcp_response"; then
   printf '  Initialize: PASS\n'
   if [[ "$mcp_response" == *REMOTE_CHROME_PLAYBOOK_VERSION=1* ]]; then
     printf '  Playbook marker: PRESENT\n'
@@ -97,15 +105,19 @@ if [[ -n "$domain" ]]; then
   if [[ -f "$token_file" ]]; then
     # shellcheck disable=SC1090
     source "$token_file"
-    public_code=$(curl --silent --output /dev/null --write-out '%{http_code}' \
-      --max-time 10 \
-      -X POST \
-      -H "Authorization: Bearer ${BEARER_TOKEN-}" \
-      -H 'Content-Type: application/json' \
-      -H 'Accept: application/json, text/event-stream' \
-      "https://${domain}/mcp" \
-      -d "$initialize_payload" 2>/dev/null || true)
-    printf '  https://%s/mcp: HTTP %s\n' "$domain" "${public_code:-000}"
+    if public_response=$(curl --fail-with-body --silent --show-error \
+        --max-time 10 \
+        -X POST \
+        -H "Authorization: Bearer ${BEARER_TOKEN-}" \
+        -H 'Content-Type: application/json' \
+        -H 'Accept: application/json, text/event-stream' \
+        "https://${domain}/mcp" \
+        -d "$initialize_payload" 2>/dev/null) &&
+      is_jsonrpc_initialize_result "$public_response"; then
+      printf '  https://%s/mcp: PASS\n' "$domain"
+    else
+      printf '  https://%s/mcp: FAIL\n' "$domain"
+    fi
   else
     printf '  Not checked: bearer token file missing\n'
   fi

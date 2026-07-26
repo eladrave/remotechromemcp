@@ -161,6 +161,54 @@ native_warn() {
   printf '⚠ %s\n' "$*" >&2
 }
 
+native_path_has_traversal() {
+  [[ "$1" =~ (^|/)\.\.(/|$) ]]
+}
+
+native_path_is_within() {
+  local child=$1
+  local parent=$2
+  if [[ "$parent" == "/" ]]; then
+    [[ "$child" == /* ]]
+  else
+    [[ "$child" == "$parent" || "$child" == "$parent"/* ]]
+  fi
+}
+
+native_canonical_contained_path() {
+  local name=$1
+  local value=$2
+  local parent=$3
+  local allow_parent=${4:-0}
+  if [[ "$value" != /* || "$value" == *$'\n'* ]] || native_path_has_traversal "$value"; then
+    native_config_error "$name must be an absolute path without traversal"
+    return 1
+  fi
+  local resolved
+  resolved=$(realpath -m -- "$value") || return 1
+  if ! native_path_is_within "$resolved" "$parent" ||
+    [[ "$allow_parent" != 1 && "$resolved" == "$parent" ]]; then
+    native_config_error "$name escapes its allowed root"
+    return 1
+  fi
+  printf '%s\n' "$resolved"
+}
+
+native_make_temp_file() {
+  if [[ "${REMOTE_CHROME_DRY_RUN:-0}" == 1 ]]; then
+    local temp_dir="$REMOTE_CHROME_ROOT/tmp"
+    install -d -m 700 -- "$temp_dir"
+    mktemp "$temp_dir/file.XXXXXX"
+  else
+    mktemp
+  fi
+}
+
+native_command_log() {
+  [[ -n "${REMOTE_CHROME_COMMAND_LOG-}" ]] || return 0
+  printf '%s\n' "$*" >> "$REMOTE_CHROME_COMMAND_LOG"
+}
+
 native_root_path() {
   local path=$1
   if [[ "$REMOTE_CHROME_ROOT" == "/" ]]; then
@@ -189,7 +237,7 @@ native_write_user_secret() {
   local destination=$1
   local content=$2
   local temporary
-  temporary=$(mktemp)
+  temporary=$(native_make_temp_file)
   chmod 600 "$temporary"
   printf '%s\n' "$content" > "$temporary"
   install -D -m 600 -- "$temporary" "$destination"
@@ -200,7 +248,7 @@ native_write_root_secret() {
   local destination=$1
   local content=$2
   local temporary
-  temporary=$(mktemp)
+  temporary=$(native_make_temp_file)
   chmod 600 "$temporary"
   printf '%s\n' "$content" > "$temporary"
   native_install_file 600 "$temporary" "$destination"
@@ -223,28 +271,84 @@ EOF
 }
 
 native_initialize_paths() {
-  REMOTE_CHROME_ROOT="${REMOTE_CHROME_ROOT:-/}"
-  if [[ "$REMOTE_CHROME_ROOT" != /* || -L "$REMOTE_CHROME_ROOT" ]]; then
-    native_config_error "REMOTE_CHROME_ROOT must be an absolute, non-symlink path"
+  local root_was_set=0
+  [[ -n "${REMOTE_CHROME_ROOT+x}" ]] && root_was_set=1
+  local requested_root=${REMOTE_CHROME_ROOT:-/}
+  if [[ "$requested_root" != /* || "$requested_root" == *$'\n'* ]] ||
+    native_path_has_traversal "$requested_root" ||
+    [[ -L "$requested_root" || ! -d "$requested_root" ]]; then
+    native_config_error "REMOTE_CHROME_ROOT must be an existing absolute, non-symlink directory without traversal"
+    return 1
+  fi
+  REMOTE_CHROME_ROOT=$(realpath -e -- "$requested_root") || return 1
+
+  if [[ "${REMOTE_CHROME_DRY_RUN:-0}" == 1 ]]; then
+    if [[ "$root_was_set" != 1 || "$REMOTE_CHROME_ROOT" == "/" ]]; then
+      native_config_error "dry-run mode requires an explicit sandbox root"
+      return 1
+    fi
+    local temp_root
+    temp_root=$(realpath -e -- "${TMPDIR:-/tmp}") || return 1
+    if [[ "$REMOTE_CHROME_ROOT" == "$temp_root" ]] ||
+      ! native_path_is_within "$REMOTE_CHROME_ROOT" "$temp_root" ||
+      [[ "$(stat -c '%u' "$REMOTE_CHROME_ROOT")" != "$(id -u)" ]]; then
+      native_config_error "dry-run sandbox root must be a user-owned child of $temp_root"
+      return 1
+    fi
+  elif [[ "$REMOTE_CHROME_ROOT" != "/" ]]; then
+    native_config_error "a non-root REMOTE_CHROME_ROOT is only allowed in dry-run mode"
     return 1
   fi
 
+  local requested_home
   if [[ "$REMOTE_CHROME_ROOT" == "/" ]]; then
-    REMOTE_CHROME_HOME="${REMOTE_CHROME_HOME:-$HOME}"
+    requested_home="${REMOTE_CHROME_HOME:-$HOME}"
   else
-    REMOTE_CHROME_HOME="${REMOTE_CHROME_HOME:-${REMOTE_CHROME_ROOT%/}/home}"
+    requested_home="${REMOTE_CHROME_HOME:-${REMOTE_CHROME_ROOT%/}/home}"
   fi
-  if [[ "$REMOTE_CHROME_HOME" != /* || "$REMOTE_CHROME_HOME" == "/" ]]; then
-    native_config_error "REMOTE_CHROME_HOME must be a safe absolute path"
-    return 1
+  if [[ "$REMOTE_CHROME_ROOT" == "/" ]]; then
+    if [[ "$requested_home" != /* || "$requested_home" == "/" ]] ||
+      native_path_has_traversal "$requested_home"; then
+      native_config_error "REMOTE_CHROME_HOME must be a safe absolute path"
+      return 1
+    fi
+    REMOTE_CHROME_HOME=$(realpath -m -- "$requested_home") || return 1
+  else
+    REMOTE_CHROME_HOME=$(native_canonical_contained_path \
+      REMOTE_CHROME_HOME "$requested_home" "$REMOTE_CHROME_ROOT") || return 1
   fi
 
-  CHROME_MCP_PROFILE="${CHROME_MCP_PROFILE:-$REMOTE_CHROME_HOME/.config/chrome-mcp-profile}"
-  TOKEN_FILE="${TOKEN_FILE:-$REMOTE_CHROME_HOME/.config/mcp-bearer-token.env}"
-  LOGIN_ENV_FILE="${LOGIN_ENV_FILE:-$REMOTE_CHROME_HOME/.config/remote-chrome-login.env}"
-  SYSTEMD_USER_DIR="${SYSTEMD_USER_DIR:-$REMOTE_CHROME_HOME/.config/systemd/user}"
-  MIGRATION_MARKER="${MIGRATION_MARKER:-$REMOTE_CHROME_HOME/.config/remote-chrome-headed-migration}"
-  BACKUP_DIR="${BACKUP_DIR:-$REMOTE_CHROME_HOME/.config/remote-chrome-backups}"
+  EXPECTED_CHROME_MCP_PROFILE=$(realpath -m -- \
+    "$REMOTE_CHROME_HOME/.config/chrome-mcp-profile")
+  CHROME_MCP_PROFILE=$(native_canonical_contained_path CHROME_MCP_PROFILE \
+    "${CHROME_MCP_PROFILE:-$EXPECTED_CHROME_MCP_PROFILE}" "$REMOTE_CHROME_HOME") || return 1
+  TOKEN_FILE=$(native_canonical_contained_path TOKEN_FILE \
+    "${TOKEN_FILE:-$REMOTE_CHROME_HOME/.config/mcp-bearer-token.env}" \
+    "$REMOTE_CHROME_HOME") || return 1
+  LOGIN_ENV_FILE=$(native_canonical_contained_path LOGIN_ENV_FILE \
+    "${LOGIN_ENV_FILE:-$REMOTE_CHROME_HOME/.config/remote-chrome-login.env}" \
+    "$REMOTE_CHROME_HOME") || return 1
+  SYSTEMD_USER_DIR=$(native_canonical_contained_path SYSTEMD_USER_DIR \
+    "${SYSTEMD_USER_DIR:-$REMOTE_CHROME_HOME/.config/systemd/user}" \
+    "$REMOTE_CHROME_HOME") || return 1
+  MIGRATION_MARKER=$(native_canonical_contained_path MIGRATION_MARKER \
+    "${MIGRATION_MARKER:-$REMOTE_CHROME_HOME/.config/remote-chrome-headed-migration}" \
+    "$REMOTE_CHROME_HOME") || return 1
+  PROFILE_BACKUP_MARKER=$(native_canonical_contained_path PROFILE_BACKUP_MARKER \
+    "${PROFILE_BACKUP_MARKER:-$REMOTE_CHROME_HOME/.config/remote-chrome-profile-backup-complete}" \
+    "$REMOTE_CHROME_HOME") || return 1
+  BACKUP_DIR=$(native_canonical_contained_path BACKUP_DIR \
+    "${BACKUP_DIR:-$REMOTE_CHROME_HOME/.config/remote-chrome-backups}" \
+    "$REMOTE_CHROME_HOME") || return 1
+  if [[ -n "${REMOTE_CHROME_COMMAND_LOG-}" ]]; then
+    if [[ "${REMOTE_CHROME_DRY_RUN:-0}" != 1 ]]; then
+      native_config_error "REMOTE_CHROME_COMMAND_LOG is only allowed in dry-run mode"
+      return 1
+    fi
+    REMOTE_CHROME_COMMAND_LOG=$(native_canonical_contained_path \
+      REMOTE_CHROME_COMMAND_LOG "$REMOTE_CHROME_COMMAND_LOG" \
+      "$REMOTE_CHROME_ROOT") || return 1
+  fi
   NGINX_SITE=$(native_root_path /etc/nginx/sites-available/playwright-mcp)
   NGINX_ENABLED=$(native_root_path /etc/nginx/sites-enabled/playwright-mcp)
   LOGIN_HTPASSWD_REAL=$(native_root_path /etc/nginx/.remote-chrome-login.htpasswd)
@@ -328,6 +432,11 @@ native_load_or_create_login_credentials() {
       native_config_error "existing login credential file is incomplete; refusing to rotate it"
       return 1
     fi
+    LOGIN_URL="https://${DOMAIN}/login/"
+    native_write_user_secret "$LOGIN_ENV_FILE" \
+      "LOGIN_USERNAME=$LOGIN_USERNAME
+LOGIN_PASSWORD=$LOGIN_PASSWORD
+LOGIN_URL=$LOGIN_URL"
     chmod 600 "$LOGIN_ENV_FILE"
     native_success "Preserving existing login credentials at $LOGIN_ENV_FILE"
   else
@@ -367,19 +476,92 @@ native_install_dependencies() {
   fi
 }
 
+NATIVE_PRIOR_ACTIVE_UNITS=()
+NATIVE_PRIOR_NGINX_ACTIVE=0
+
+native_capture_runtime_state() {
+  NATIVE_PRIOR_ACTIVE_UNITS=()
+  NATIVE_PRIOR_NGINX_ACTIVE=0
+  local unit
+  if [[ "${REMOTE_CHROME_DRY_RUN:-0}" == 1 ]]; then
+    local requested=" ${REMOTE_CHROME_DRY_RUN_ACTIVE_UNITS-} "
+    for unit in "${REMOTE_CHROME_UNITS[@]}"; do
+      if [[ "$requested" == *" $unit "* ]]; then
+        NATIVE_PRIOR_ACTIVE_UNITS+=("$unit")
+      fi
+    done
+    [[ "${REMOTE_CHROME_DRY_RUN_NGINX_ACTIVE:-0}" == 1 ]] &&
+      NATIVE_PRIOR_NGINX_ACTIVE=1
+  else
+    for unit in "${REMOTE_CHROME_UNITS[@]}"; do
+      if systemctl --user is-active --quiet "$unit"; then
+        NATIVE_PRIOR_ACTIVE_UNITS+=("$unit")
+      fi
+    done
+    if systemctl is-active --quiet nginx; then
+      NATIVE_PRIOR_NGINX_ACTIVE=1
+    fi
+  fi
+  native_command_log "capture-active ${NATIVE_PRIOR_ACTIVE_UNITS[*]}"
+  if [[ "$NATIVE_PRIOR_NGINX_ACTIVE" == 1 ]]; then
+    native_command_log "capture-nginx active"
+  else
+    native_command_log "capture-nginx inactive"
+  fi
+}
+
+native_restore_prior_runtime() {
+  local failures=0
+  local unit
+  for unit in "${NATIVE_PRIOR_ACTIVE_UNITS[@]}"; do
+    if [[ "${REMOTE_CHROME_DRY_RUN:-0}" == 1 ]]; then
+      native_command_log "recovery-start $unit" || failures=$((failures + 1))
+    else
+      systemctl --user start "$unit" || failures=$((failures + 1))
+    fi
+  done
+  if ((failures)); then
+    native_config_error "failed to restore $failures service(s) after stop failure"
+    return 1
+  fi
+}
+
+native_stop_user_unit_checked() {
+  local unit=$1
+  systemctl --user stop "$unit" 2>/dev/null || true
+  if systemctl --user is-active --quiet "$unit"; then
+    native_config_error "$unit remains active after stop request"
+    return 1
+  fi
+}
+
 native_stop_active_browser() {
   if [[ "${REMOTE_CHROME_DRY_RUN:-0}" == 1 ]]; then
-    native_info "Dry run: would stop playwright-mcp.service and chrome-mcp.service"
+    native_command_log "stop playwright-mcp.service"
+    native_command_log "stop chrome-mcp.service"
+    if [[ "${REMOTE_CHROME_DRY_RUN_STOP_RESULT:-pass}" == fail ]]; then
+      native_config_error "dry-run simulated service stop failure"
+      return 1
+    fi
     return
   fi
-  systemctl --user stop playwright-mcp.service 2>/dev/null || true
-  systemctl --user stop chrome-mcp.service 2>/dev/null || true
+  native_stop_user_unit_checked playwright-mcp.service || return 1
+  native_stop_user_unit_checked chrome-mcp.service || return 1
 }
 
 native_backup_profile_once() {
   local skip_backup=$1
-  if [[ -f "$MIGRATION_MARKER" ]]; then
-    return
+  if [[ -f "$PROFILE_BACKUP_MARKER" ]]; then
+    local completed_archive
+    completed_archive=$(cat "$PROFILE_BACKUP_MARKER")
+    completed_archive=$(native_canonical_contained_path completed_archive \
+      "$completed_archive" "$BACKUP_DIR") || return 1
+    [[ -f "$completed_archive" ]] || {
+      native_config_error "profile backup marker references a missing archive"
+      return 1
+    }
+    native_success "Reusing protected profile backup at $completed_archive"
+    return 0
   fi
   if [[ "$skip_backup" == 1 ]]; then
     native_warn "Profile backup explicitly skipped for first headed migration"
@@ -387,15 +569,18 @@ native_backup_profile_once() {
   fi
 
   install -d -m 700 -- "$BACKUP_DIR"
-  local timestamp archive profile_name
-  timestamp=$(date -u +%Y%m%dT%H%M%SZ)
-  archive="$BACKUP_DIR/chrome-mcp-profile-$timestamp.tar.gz"
+  local archive profile_name
+  archive=$(mktemp "$BACKUP_DIR/chrome-mcp-profile-XXXXXXXX.tar.gz")
   profile_name=$(basename "$CHROME_MCP_PROFILE")
   native_info "Backing up Chrome profile before headed migration: $archive"
-  tar -C "$(dirname "$CHROME_MCP_PROFILE")" \
+  if ! tar -C "$(dirname "$CHROME_MCP_PROFILE")" \
     --exclude="$profile_name/Singleton*" \
-    -czf "$archive" -- "$profile_name"
+    -czf "$archive" -- "$profile_name"; then
+    rm -f -- "$archive"
+    return 1
+  fi
   chmod 600 "$archive"
+  native_write_user_secret "$PROFILE_BACKUP_MARKER" "$archive"
 }
 
 native_backup_configuration() {
@@ -424,37 +609,79 @@ native_backup_configuration() {
 native_restore_configuration() {
   local backup_path=$1
   native_warn "Activation failed; restoring the previous service and proxy configuration"
+  local failures=0
   local unit
+  local reverse_units=(
+    playwright-mcp.service
+    chrome-novnc.service
+    chrome-vnc.service
+    chrome-mcp.service
+    chrome-window-manager.service
+    chrome-display.service
+  )
+  for unit in "${reverse_units[@]}"; do
+    if [[ "${REMOTE_CHROME_DRY_RUN:-0}" == 1 ]]; then
+      native_command_log "rollback-stop $unit" || failures=$((failures + 1))
+    else
+      native_stop_user_unit_checked "$unit" || failures=$((failures + 1))
+    fi
+  done
+
   for unit in "${REMOTE_CHROME_UNITS[@]}"; do
-    rm -f -- "$SYSTEMD_USER_DIR/$unit"
-    rm -f -- "$SYSTEMD_USER_DIR/default.target.wants/$unit"
+    rm -f -- "$SYSTEMD_USER_DIR/$unit" || failures=$((failures + 1))
+    rm -f -- "$SYSTEMD_USER_DIR/default.target.wants/$unit" ||
+      failures=$((failures + 1))
     if [[ -e "$backup_path/systemd/$unit" || -L "$backup_path/systemd/$unit" ]]; then
-      cp -a -- "$backup_path/systemd/$unit" "$SYSTEMD_USER_DIR/$unit"
+      cp -a -- "$backup_path/systemd/$unit" "$SYSTEMD_USER_DIR/$unit" ||
+        failures=$((failures + 1))
     fi
     if [[ -e "$backup_path/default.target.wants/$unit" ||
       -L "$backup_path/default.target.wants/$unit" ]]; then
       install -d -m 700 -- "$SYSTEMD_USER_DIR/default.target.wants"
       cp -a -- "$backup_path/default.target.wants/$unit" \
-        "$SYSTEMD_USER_DIR/default.target.wants/$unit"
+        "$SYSTEMD_USER_DIR/default.target.wants/$unit" ||
+        failures=$((failures + 1))
     fi
   done
 
-  native_privileged rm -f -- "$NGINX_SITE" "$NGINX_ENABLED"
+  native_privileged rm -f -- "$NGINX_SITE" "$NGINX_ENABLED" ||
+    failures=$((failures + 1))
   if [[ -e "$backup_path/nginx/site" || -L "$backup_path/nginx/site" ]]; then
-    native_privileged cp -a -- "$backup_path/nginx/site" "$NGINX_SITE"
+    native_privileged cp -a -- "$backup_path/nginx/site" "$NGINX_SITE" ||
+      failures=$((failures + 1))
   fi
   if [[ -e "$backup_path/nginx/enabled" || -L "$backup_path/nginx/enabled" ]]; then
-    native_privileged cp -a -- "$backup_path/nginx/enabled" "$NGINX_ENABLED"
+    native_privileged cp -a -- "$backup_path/nginx/enabled" "$NGINX_ENABLED" ||
+      failures=$((failures + 1))
   fi
 
-  if [[ "${REMOTE_CHROME_DRY_RUN:-0}" != 1 ]]; then
-    systemctl --user daemon-reload || true
-    native_privileged nginx -t && native_privileged systemctl reload nginx || true
-    local restore_unit
-    for restore_unit in chrome-display.service chrome-window-manager.service chrome-mcp.service \
-      chrome-vnc.service chrome-novnc.service playwright-mcp.service; do
-      systemctl --user start "$restore_unit" 2>/dev/null || true
-    done
+  if [[ "${REMOTE_CHROME_DRY_RUN:-0}" == 1 ]]; then
+    native_command_log "rollback-daemon-reload" || failures=$((failures + 1))
+  else
+    systemctl --user daemon-reload || failures=$((failures + 1))
+  fi
+  local restore_unit
+  for restore_unit in "${NATIVE_PRIOR_ACTIVE_UNITS[@]}"; do
+    if [[ "${REMOTE_CHROME_DRY_RUN:-0}" == 1 ]]; then
+      native_command_log "rollback-start $restore_unit" ||
+        failures=$((failures + 1))
+    else
+      systemctl --user start "$restore_unit" || failures=$((failures + 1))
+    fi
+  done
+  if [[ "$NATIVE_PRIOR_NGINX_ACTIVE" == 1 ]]; then
+    if [[ "${REMOTE_CHROME_DRY_RUN:-0}" == 1 ]]; then
+      native_command_log "rollback-nginx-reload" || failures=$((failures + 1))
+    else
+      native_privileged nginx -t || failures=$((failures + 1))
+      native_privileged systemctl reload nginx || failures=$((failures + 1))
+    fi
+  elif [[ "${REMOTE_CHROME_DRY_RUN:-0}" != 1 ]]; then
+    native_privileged systemctl stop nginx || failures=$((failures + 1))
+  fi
+  if ((failures)); then
+    native_config_error "rollback incomplete: $failures operation(s) failed"
+    return 1
   fi
 }
 
@@ -585,16 +812,44 @@ native_activate_configuration() {
     systemctl --user start "$unit" || return 1
   done
   native_privileged nginx -t || return 1
-  native_privileged systemctl reload nginx || return 1
+  if [[ "$NATIVE_PRIOR_NGINX_ACTIVE" == 1 ]]; then
+    native_privileged systemctl reload nginx || return 1
+  else
+    native_privileged systemctl start nginx || return 1
+  fi
   native_wait_for_health_checks
 }
 
 native_write_migration_marker() {
   local temporary
-  temporary=$(mktemp)
+  temporary=$(native_make_temp_file)
   printf 'REMOTE_CHROME_HEADED_MIGRATION=1\n' > "$temporary"
   install -D -m 600 -- "$temporary" "$MIGRATION_MARKER"
   rm -f -- "$temporary"
+}
+
+native_validate_profile_deletion_target() {
+  local candidate=$1
+  local expected=$2
+  local remote_home=$3
+  local remote_root=$4
+  if [[ "$candidate" != /* || "$candidate" == "/" || "$candidate" == "$remote_home" ||
+    "$candidate" == *$'\n'* ]] || native_path_has_traversal "$candidate" ||
+    [[ -L "$candidate" ]]; then
+    native_config_error "refusing unsafe profile deletion target: $candidate"
+    return 1
+  fi
+  local resolved_candidate resolved_expected resolved_home resolved_root
+  resolved_candidate=$(realpath -m -- "$candidate") || return 1
+  resolved_expected=$(realpath -m -- "$expected") || return 1
+  resolved_home=$(realpath -m -- "$remote_home") || return 1
+  resolved_root=$(realpath -m -- "$remote_root") || return 1
+  if [[ "$resolved_candidate" != "$resolved_expected" ]] ||
+    ! native_path_is_within "$resolved_candidate" "$resolved_home" ||
+    ! native_path_is_within "$resolved_candidate" "$resolved_root"; then
+    native_config_error "profile deletion target is not the expected managed profile"
+    return 1
+  fi
 }
 
 native_setup_main() {
@@ -664,28 +919,47 @@ native_setup_main() {
     fi
   fi
 
-  native_stop_active_browser
-  native_backup_profile_once "$skip_profile_backup" || return
+  native_capture_runtime_state || return
+  if ! native_stop_active_browser; then
+    native_restore_prior_runtime || native_warn "runtime recovery after stop failure was incomplete"
+    return 1
+  fi
+  if ! native_backup_profile_once "$skip_profile_backup"; then
+    native_restore_prior_runtime ||
+      native_warn "runtime recovery after backup failure was incomplete"
+    return 1
+  fi
 
   install -d -m 700 -- "$BACKUP_DIR"
-  local timestamp config_backup render_dir
-  timestamp=$(date -u +%Y%m%dT%H%M%SZ)
-  config_backup="$BACKUP_DIR/config-$timestamp"
-  native_backup_configuration "$config_backup" || return
-  render_dir=$(mktemp -d "${TMPDIR:-/tmp}/remote-chrome-render.XXXXXX")
+  local config_backup render_dir
+  config_backup=$(mktemp -d "$BACKUP_DIR/config-XXXXXXXX")
+  if ! native_backup_configuration "$config_backup"; then
+    native_restore_prior_runtime ||
+      native_warn "runtime recovery after configuration backup failure was incomplete"
+    return 1
+  fi
+  if [[ "${REMOTE_CHROME_DRY_RUN:-0}" == 1 ]]; then
+    install -d -m 700 -- "$REMOTE_CHROME_ROOT/tmp"
+    render_dir=$(mktemp -d "$REMOTE_CHROME_ROOT/tmp/remote-chrome-render.XXXXXX")
+  else
+    render_dir=$(mktemp -d "${TMPDIR:-/tmp}/remote-chrome-render.XXXXXX")
+  fi
   if ! native_render_staged_configuration "$render_dir"; then
-    native_restore_configuration "$config_backup"
+    native_restore_configuration "$config_backup" ||
+      native_warn "rollback failed after render failure"
     rm -rf -- "$render_dir"
     return 1
   fi
   if ! native_validate_staged_nginx "$render_dir"; then
-    native_restore_configuration "$config_backup"
+    native_restore_configuration "$config_backup" ||
+      native_warn "rollback failed after nginx validation failure"
     rm -rf -- "$render_dir"
     return 1
   fi
   if ! native_install_staged_configuration "$render_dir" ||
     ! native_activate_configuration; then
-    native_restore_configuration "$config_backup"
+    native_restore_configuration "$config_backup" ||
+      native_warn "rollback failed after activation failure"
     rm -rf -- "$render_dir"
     return 1
   fi

@@ -292,4 +292,6 @@ for preserved_secret in "$test_token_file" "$test_login_file"; do
   fi
 done
 
+bash "$root_dir/tests/native-fix-round1.test.sh"
+
 echo "native configuration contract passed"
