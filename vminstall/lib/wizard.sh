@@ -11,13 +11,19 @@ vm_prompt() {
   printf '%s' "$value"
 }
 
-vm_validate_data_dir() {
-  local candidate=$1
+vm_canonicalize_data_dir() {
+  local candidate=${1:-}
   [[ $candidate == /* ]] || return 1
-  case "$candidate" in
+  [[ "$candidate" != *$'\n'* ]] || return 1
+  realpath -m -- "$candidate"
+}
+
+vm_validate_data_dir() {
+  local canonical
+  canonical=$(vm_canonicalize_data_dir "${1:-}") || return 1
+  case "$canonical" in
     /|/home|/root|/etc|/var) return 1 ;;
   esac
-  [[ "$candidate" != *$'\n'* ]]
 }
 
 vm_installer_usage() {
@@ -90,6 +96,10 @@ vm_collect_configuration() {
     vm_die 2 "Invalid domain: $DOMAIN"
   vm_validate_email "$ACME_EMAIL" ||
     vm_die 2 "Invalid email: $ACME_EMAIL"
-  vm_validate_data_dir "$REMOTE_CHROME_DATA_DIR" ||
+  local canonical_data_dir
+  canonical_data_dir=$(vm_canonicalize_data_dir "$REMOTE_CHROME_DATA_DIR") ||
     vm_die 2 "Invalid data directory: $REMOTE_CHROME_DATA_DIR"
+  vm_validate_data_dir "$canonical_data_dir" ||
+    vm_die 2 "Invalid data directory: $REMOTE_CHROME_DATA_DIR"
+  REMOTE_CHROME_DATA_DIR=$canonical_data_dir
 }

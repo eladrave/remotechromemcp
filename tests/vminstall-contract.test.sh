@@ -13,6 +13,10 @@ test_root="$(mktemp -d /tmp/remote-chrome-vminstall-contract.XXXXXX)"
 trap 'rm -rf "$test_root"' EXIT
 [[ -d "$test_root" && "$test_root" == /tmp/* ]] ||
   fail 'test root must be a real directory beneath /tmp'
+command -v setsid >/dev/null 2>&1 ||
+  fail 'setsid is required to test the Linux no-controlling-TTY contract'
+setsid --help 2>&1 | grep -Fq -- '--wait' ||
+  fail 'setsid --wait support is required for the no-controlling-TTY contract'
 
 REMOTE_CHROME_SKIP_MAIN=1
 # shellcheck source=../vminstall/installer-main.sh
@@ -31,13 +35,42 @@ vm_validate_email admin@example.com ||
 
 vm_validate_data_dir /var/lib/remote-chrome ||
   fail 'safe absolute data directory must be accepted'
-for unsafe_data_dir in relative / /home /root /etc /var; do
+ln -s /etc "$test_root/protected-root-link"
+for unsafe_data_dir in \
+  relative \
+  / \
+  // \
+  /tmp/.. \
+  /var/.. \
+  /home \
+  /home/ \
+  /root \
+  /root/ \
+  /etc \
+  /etc/ \
+  /var \
+  /var/ \
+  /var/lib/../.. \
+  /safe/../../etc \
+  "$test_root/../../etc" \
+  "$test_root/protected-root-link"; do
   ! vm_validate_data_dir "$unsafe_data_dir" ||
     fail "unsafe data directory must be rejected: $unsafe_data_dir"
 done
 newline_data_dir="$(printf '/tmp/first\n/tmp/second')"
 ! vm_validate_data_dir "$newline_data_dir" ||
   fail 'data directory must reject newlines'
+
+mkdir "$test_root/canonical-data"
+ln -s "$test_root/canonical-data" "$test_root/data-link"
+vm_parse_args \
+  --domain chrome.example.com \
+  --email admin@example.com \
+  --data-dir "$test_root/data-link/profile" \
+  --non-interactive
+vm_collect_configuration
+[[ "$REMOTE_CHROME_DATA_DIR" == "$test_root/canonical-data/profile" ]] ||
+  fail 'validated data directory must be stored as its canonical path'
 
 for fixture in tests/fixtures/os-release-*; do
   REMOTE_CHROME_OS_RELEASE="$fixture" \
@@ -62,6 +95,21 @@ REMOTE_CHROME_TEST_ROOT="$test_root" vm_init_paths
   fail 'systemd root must be confined beneath the test root'
 [[ "$REMOTE_CHROME_CLI_ROOT" == "$test_root/usr/local/sbin" ]] ||
   fail 'CLI root must be confined beneath the test root'
+
+REMOTE_CHROME_INSTALL_ROOT=/etc/remote-chrome-test-contamination
+REMOTE_CHROME_CONFIG_ROOT=/var/remote-chrome-test-contamination
+REMOTE_CHROME_SYSTEMD_ROOT=/usr/lib/systemd/system
+REMOTE_CHROME_CLI_ROOT=/usr/local/sbin
+REMOTE_CHROME_TEST_ROOT="$test_root"
+vm_init_paths
+[[ "$REMOTE_CHROME_INSTALL_ROOT" == "$test_root/opt/remotechromemcp" ]] ||
+  fail 'test mode must ignore a contaminated inherited install root'
+[[ "$REMOTE_CHROME_CONFIG_ROOT" == "$test_root/etc/remote-chrome" ]] ||
+  fail 'test mode must ignore a contaminated inherited config root'
+[[ "$REMOTE_CHROME_SYSTEMD_ROOT" == "$test_root/etc/systemd/system" ]] ||
+  fail 'test mode must ignore a contaminated inherited systemd root'
+[[ "$REMOTE_CHROME_CLI_ROOT" == "$test_root/usr/local/sbin" ]] ||
+  fail 'test mode must ignore a contaminated inherited CLI root'
 
 set +e
 (
@@ -153,13 +201,14 @@ grep -Fq 'Interactive input unavailable' "$test_root/prompt-no-tty.stderr" ||
   fail 'prompt without TTY must not consume piped stdin'
 
 set +e
-env -u REMOTE_CHROME_TTY \
-  REMOTE_CHROME_SKIP_MAIN=1 \
-  bash -c \
-    'source vminstall/installer-main.sh; vm_prompt "Domain: "' \
-    </dev/null \
-    >"$test_root/no-controlling-tty.stdout" \
-    2>"$test_root/no-controlling-tty.stderr"
+setsid --wait \
+  env -u REMOTE_CHROME_TTY \
+    REMOTE_CHROME_SKIP_MAIN=1 \
+    bash -c \
+      'source vminstall/installer-main.sh; vm_prompt "Domain: "' \
+      </dev/null \
+      >"$test_root/no-controlling-tty.stdout" \
+      2>"$test_root/no-controlling-tty.stderr"
 no_controlling_tty_status=$?
 set -e
 [[ "$no_controlling_tty_status" -eq 2 ]] ||
