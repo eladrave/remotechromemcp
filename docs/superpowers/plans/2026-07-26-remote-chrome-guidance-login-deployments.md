@@ -660,6 +660,8 @@ Chrome must bind CDP to `127.0.0.1`. websockify and Playwright MCP must bind the
 - MCP initialize returns HTTP 200 and contains `REMOTE_CHROME_PLAYBOOK_VERSION=1`;
 - noVNC serves its index locally.
 
+Every health-check initialize request must capture the returned `Mcp-Session-Id` and close that transport with an authenticated DELETE before exiting. The recurring health check must not accumulate server-side MCP sessions.
+
 - [ ] **Step 5: Add Compose and Caddy routing**
 
 `compose.yaml` must:
@@ -671,6 +673,7 @@ Chrome must bind CDP to `127.0.0.1`. websockify and Playwright MCP must bind the
 - use health-based dependency ordering;
 - persist Caddy data/config;
 - set `restart: unless-stopped` and `init: true`.
+- allow tests to override the proxy's host bind address and HTTP/HTTPS ports while defaulting production to ports 80 and 443.
 
 Pass `LOGIN_PASSWORD_HASH` without Compose interpolation. Store the generated bcrypt value as a single-quoted `.env` value and include a contract test using a representative `$2a$...` hash to prove the rendered Caddy environment receives the complete literal hash.
 
@@ -690,22 +693,22 @@ Pass `LOGIN_PASSWORD_HASH` without Compose interpolation. Store the generated bc
 `scripts/bootstrap-docker.sh` must:
 
 1. require Docker with Compose v2;
-2. read a domain argument or prompt;
+2. accept `--domain DOMAIN`, retain positional-domain compatibility, or prompt when neither is supplied;
 3. generate a 64-hex MCP token;
 4. generate a 36-byte login password;
 5. obtain the Caddy-compatible hash with `docker run --rm caddy:2-alpine caddy hash-password`;
 6. write `.env` with mode 600, single-quoting the bcrypt hash and rejecting embedded newlines or single quotes;
 7. run `docker compose config`;
 8. run `docker compose up -d --build`;
-9. poll health for up to 120 seconds;
+9. poll browser health and Caddy proxy readiness for up to 120 seconds, then make authenticated MCP and login-console requests through the public proxy;
 10. print redacted MCP examples, login URL, username, and the password once.
 
 - [ ] **Step 7: Add the Compose runtime smoke test**
 
-Create `tests/compose-smoke.test.sh`. It must use a unique Compose project name, a temporary env file with safe test-only credentials, and a cleanup trap. The test must:
+Create `tests/compose-smoke.test.sh`. It must use a unique Compose project name, a temporary env file with safe test-only credentials, isolated high host ports, and a cleanup trap. The test must:
 
-1. build and start the `browser` service;
-2. wait for the container health check to report healthy;
+1. build and start both `browser` and `proxy`;
+2. wait for the browser health check and Caddy proxy to report healthy/ready;
 3. execute checks inside the browser container proving:
    - CDP reports `Chrome/` and not `HeadlessChrome`;
    - MCP initialize returns HTTP 200 with `REMOTE_CHROME_PLAYBOOK_VERSION=1`;
@@ -713,7 +716,15 @@ Create `tests/compose-smoke.test.sh`. It must use a unique Compose project name,
 4. write a harmless sentinel inside `/data/chrome-profile`;
 5. recreate the browser container without deleting volumes;
 6. verify the sentinel and healthy status survive recreation;
-7. inspect the host and assert ports 5900, 6080, 8931, and 9222 were not published.
+7. exercise the HTTPS Caddy entrypoint and prove:
+   - unauthenticated `/mcp` is 401;
+   - bearer-header and token-path initialize both return 200;
+   - each initialize response has exactly one upstream `Content-Type`;
+   - every test initialize session is closed with DELETE;
+   - authenticated GET returns 405;
+   - unauthenticated `/login/` is 401 and valid Basic auth serves noVNC;
+   - a valid authenticated WebSocket upgrade through `/login/` returns 101;
+8. inspect the host and assert ports 5900, 6080, 8931, and 9222 were not published.
 
 Skip locally with a clear message only when Docker is unavailable. In CI, Docker availability is mandatory and a skip is a failure.
 
@@ -934,6 +945,7 @@ Create `.github/workflows/ci.yml` with jobs:
    - setup Node 22;
    - `npm ci`;
    - install ShellCheck;
+   - invoke ShellCheck against repository shell scripts;
    - `./tests/run.sh`.
 2. `compose` on Ubuntu:
    - create a CI `.env` from literal safe test values;
