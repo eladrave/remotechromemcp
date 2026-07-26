@@ -1,3 +1,12 @@
+http://{$DOMAIN} {
+	handle /healthz {
+		respond "ready" 200
+	}
+	handle {
+		redir https://{$DOMAIN}{uri} permanent
+	}
+}
+
 {$DOMAIN} {
 	# Secret-bearing compatibility paths must never reach an access log.
 	log {

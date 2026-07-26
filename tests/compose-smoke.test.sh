@@ -24,10 +24,29 @@ if [[ "$docker_available" != true ]]; then
   exit 0
 fi
 
+allocate_port() {
+  node - <<'NODE'
+const net = require('node:net');
+const server = net.createServer();
+server.listen(0, '127.0.0.1', () => {
+  process.stdout.write(String(server.address().port));
+  server.close();
+});
+NODE
+}
+
 tmp_dir="$(mktemp -d)"
 project_name="remote-chrome-smoke-$(date +%s)-$$"
 env_file="$tmp_dir/compose.env"
 sentinel='.compose-smoke-profile-sentinel'
+MCP_TOKEN=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+LOGIN_USERNAME=smokeoperator
+LOGIN_PASSWORD=hiccup
+http_port="$(allocate_port)"
+https_port="$(allocate_port)"
+while [[ "$https_port" == "$http_port" ]]; do
+  https_port="$(allocate_port)"
+done
 
 cleanup() {
   docker compose --project-name "$project_name" --env-file "$env_file" \
@@ -36,14 +55,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
-cat >"$env_file" <<'EOF'
-DOMAIN=chrome.example.test
-MCP_TOKEN=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-LOGIN_USERNAME=smokeoperator
-LOGIN_PASSWORD_HASH='$2a$12$abcdefghijklmnopqrstuuABCDEFGHIJKLMNOPQRSTUVWXYZ01234'
-PLAYWRIGHT_MCP_VERSION=0.0.78
-SCREEN_GEOMETRY=1280x800x24
-EOF
+{
+  printf 'DOMAIN=localhost\n'
+  printf 'MCP_TOKEN=%s\n' "$MCP_TOKEN"
+  printf 'LOGIN_USERNAME=%s\n' "$LOGIN_USERNAME"
+  printf '%s\n' \
+    "LOGIN_PASSWORD_HASH='\$2a\$14\$Zkx19XLiW6VYouLHR5NmfOFU0z2GTNmpkT/5qqR7hx4IjWJPDhjvG'"
+  printf 'PLAYWRIGHT_MCP_VERSION=0.0.78\n'
+  printf 'SCREEN_GEOMETRY=1280x800x24\n'
+  printf 'PROXY_BIND_ADDRESS=127.0.0.1\n'
+  printf 'PROXY_HTTP_PORT=%s\n' "$http_port"
+  printf 'PROXY_HTTPS_PORT=%s\n' "$https_port"
+} >"$env_file"
 
 compose=(
   docker compose
@@ -52,14 +75,15 @@ compose=(
 )
 
 container_id() {
-  "${compose[@]}" ps -q browser
+  "${compose[@]}" ps -q "$1"
 }
 
 wait_for_healthy() {
+  local service="$1"
   local deadline=$((SECONDS + 120))
   local id health
   while ((SECONDS < deadline)); do
-    id="$(container_id)"
+    id="$(container_id "$service")"
     if [[ -n "$id" ]]; then
       health="$(
         docker inspect --format \
@@ -71,19 +95,20 @@ wait_for_healthy() {
           return 0
           ;;
         unhealthy)
-          "${compose[@]}" logs browser >&2
-          fail 'browser became unhealthy'
+          "${compose[@]}" logs "$service" >&2
+          fail "$service became unhealthy"
           ;;
       esac
     fi
     sleep 2
   done
-  "${compose[@]}" logs browser >&2
-  fail 'timed out waiting 120 seconds for browser health'
+  "${compose[@]}" logs "$service" >&2
+  fail "timed out waiting 120 seconds for $service health"
 }
 
-"${compose[@]}" up -d --build browser
-wait_for_healthy
+"${compose[@]}" up -d --build
+wait_for_healthy browser
+wait_for_healthy proxy
 
 "${compose[@]}" exec -T browser bash -euo pipefail -c '
   metadata="$(curl -fsS http://127.0.0.1:9222/json/version)"
@@ -91,14 +116,35 @@ wait_for_healthy
     '"'"'(.Browser | startswith("Chrome/")) and
      (."User-Agent" | contains("HeadlessChrome") | not)'"'"' >/dev/null
 
-  payload='"'"'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"compose-smoke","version":"1.0"}}}'"'"'
+  payload='"'"'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"compose-smoke-internal","version":"1.0"}}}'"'"'
   body="$(mktemp)"
-  trap '"'"'rm -f "$body"'"'"' EXIT
-  code="$(curl -sS -o "$body" -w "%{http_code}" -X POST \
+  headers="$(mktemp)"
+  session_id=
+  cleanup_internal() {
+    if [[ -n "$session_id" ]]; then
+      curl -fsS -X DELETE -H "Mcp-Session-Id: $session_id" \
+        http://127.0.0.1:8931/mcp >/dev/null 2>&1 || true
+    fi
+    rm -f "$body" "$headers"
+  }
+  trap cleanup_internal EXIT
+
+  code="$(curl -sS -o "$body" -D "$headers" -w "%{http_code}" -X POST \
     -H "Content-Type: application/json" \
     -H "Accept: application/json, text/event-stream" \
     --data "$payload" http://127.0.0.1:8931/mcp)"
   [[ "$code" == 200 ]]
+  session_id="$(
+    grep -i "^Mcp-Session-Id:" "$headers" |
+      head -n 1 |
+      cut -d: -f2- |
+      tr -d "\r" |
+      xargs
+  )"
+  [[ -n "$session_id" ]]
+  curl -fsS -X DELETE -H "Mcp-Session-Id: $session_id" \
+    http://127.0.0.1:8931/mcp >/dev/null
+  session_id=
   grep -q "REMOTE_CHROME_PLAYBOOK_VERSION=1" "$body"
   curl -fsS http://127.0.0.1:6080/ | grep -qi "noVNC"
 '
@@ -107,20 +153,140 @@ wait_for_healthy
   sh -c "printf '%s\n' compose-smoke >'/data/chrome-profile/$sentinel'"
 
 "${compose[@]}" up -d --force-recreate --no-deps browser
-wait_for_healthy
+wait_for_healthy browser
+wait_for_healthy proxy
 
 "${compose[@]}" exec -T browser \
   grep -qx compose-smoke "/data/chrome-profile/$sentinel"
 
-browser_id="$(container_id)"
-[[ -n "$browser_id" ]] || fail 'browser container is missing after recreation'
-port_bindings="$(docker inspect --format '{{json .HostConfig.PortBindings}}' "$browser_id")"
-published_ports="$(docker port "$browser_id" || true)"
-for port in 5900 6080 8931 9222; do
-  if [[ "$port_bindings" == *"\"${port}/tcp\""* ||
-    "$published_ports" == *"${port}/tcp"* ]]; then
-    fail "private port $port was published to the host"
-  fi
+curl_https=(
+  curl
+  --insecure
+  --silent
+  --show-error
+  --resolve "localhost:${https_port}:127.0.0.1"
+)
+base_url="https://localhost:${https_port}"
+initialize_payload='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"compose-smoke-public","version":"1.0"}}}'
+
+unauth_mcp_code="$(
+  "${curl_https[@]}" --output /dev/null --write-out '%{http_code}' \
+    --request POST \
+    --header 'Content-Type: application/json' \
+    --header 'Accept: application/json, text/event-stream' \
+    --data "$initialize_payload" \
+    "$base_url/mcp"
+)"
+[[ "$unauth_mcp_code" == 401 ]] ||
+  fail "unauthenticated /mcp expected 401, got $unauth_mcp_code"
+
+initialize_and_close() {
+  local url="$1"
+  shift
+  local headers body code content_type_count session_id
+  headers="$(mktemp "$tmp_dir/public-headers.XXXXXX")"
+  body="$(mktemp "$tmp_dir/public-body.XXXXXX")"
+
+  code="$(
+    "${curl_https[@]}" \
+      --output "$body" \
+      --dump-header "$headers" \
+      --write-out '%{http_code}' \
+      --request POST \
+      --header 'Content-Type: application/json' \
+      --header 'Accept: application/json, text/event-stream' \
+      --data "$initialize_payload" \
+      "$@" \
+      "$url"
+  )"
+  [[ "$code" == 200 ]] || fail "public initialize expected 200, got $code"
+  session_id="$(
+    awk 'BEGIN { IGNORECASE=1 }
+      /^Mcp-Session-Id:/ {
+        sub(/^[^:]+:[[:space:]]*/, "")
+        sub(/\r$/, "")
+        print
+        exit
+      }' "$headers"
+  )"
+  [[ -n "$session_id" ]] || fail 'public initialize returned no Mcp-Session-Id'
+  "${curl_https[@]}" --fail \
+    --request DELETE \
+    --header "Mcp-Session-Id: $session_id" \
+    "$@" \
+    "$url" >/dev/null
+  grep -q 'REMOTE_CHROME_PLAYBOOK_VERSION=1' "$body" ||
+    fail 'public initialize response is missing playbook instructions'
+  content_type_count="$(
+    awk 'BEGIN { IGNORECASE=1; count=0 }
+      /^Content-Type:/ { count += 1 }
+      END { print count }' "$headers"
+  )"
+  [[ "$content_type_count" == 1 ]] ||
+    fail "public initialize expected exactly one content-type, got $content_type_count"
+}
+
+initialize_and_close "$base_url/mcp" \
+  --header "Authorization: Bearer $MCP_TOKEN"
+token_url="$base_url/${MCP_TOKEN}/mcp"
+initialize_and_close "$token_url"
+
+get_code="$(
+  "${curl_https[@]}" --output /dev/null --write-out '%{http_code}' \
+    --request GET \
+    --header "Authorization: Bearer $MCP_TOKEN" \
+    "$base_url/mcp"
+)"
+[[ "$get_code" == 405 ]] ||
+  fail "authenticated GET expected 405, got $get_code"
+
+login_unauth_code="$(
+  "${curl_https[@]}" --output /dev/null --write-out '%{http_code}' \
+    "$base_url/login/"
+)"
+[[ "$login_unauth_code" == 401 ]] ||
+  fail "unauthenticated /login/ expected 401, got $login_unauth_code"
+
+login_body="$tmp_dir/login.html"
+login_code="$(
+  "${curl_https[@]}" --output "$login_body" --write-out '%{http_code}' \
+    --user "$LOGIN_USERNAME:$LOGIN_PASSWORD" \
+    "$base_url/login/"
+)"
+[[ "$login_code" == 200 ]] ||
+  fail "authenticated /login/ expected 200, got $login_code"
+grep -qi 'noVNC' "$login_body" ||
+  fail 'authenticated /login/ did not serve noVNC'
+
+websocket_headers="$tmp_dir/websocket.headers"
+set +e
+"${curl_https[@]}" --http1.1 --max-time 3 \
+  --output /dev/null \
+  --dump-header "$websocket_headers" \
+  --user "$LOGIN_USERNAME:$LOGIN_PASSWORD" \
+  --header 'Connection: Upgrade' \
+  --header 'Upgrade: websocket' \
+  --header 'Sec-WebSocket-Version: 13' \
+  --header 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+  "$base_url/login/websockify"
+websocket_curl_status=$?
+set -e
+[[ "$websocket_curl_status" == 0 || "$websocket_curl_status" == 28 ]] ||
+  fail "authenticated WebSocket curl failed with $websocket_curl_status"
+grep -Eq '^HTTP/[^ ]+ 101([[:space:]]|$)' "$websocket_headers" ||
+  fail 'authenticated noVNC WebSocket expected 101'
+
+for id in $("${compose[@]}" ps -q); do
+  published_ports="$(
+    docker inspect --format \
+      '{{range $port, $bindings := .NetworkSettings.Ports}}{{if $bindings}}{{$port}} {{end}}{{end}}' \
+      "$id"
+  )"
+  for port in 5900 6080 8931 9222; do
+    if [[ "$published_ports" == *"${port}/tcp"* ]]; then
+      fail "private port $port was published to the host"
+    fi
+  done
 done
 
-printf 'PASS: Compose browser runtime and profile persistence\n'
+printf 'PASS: Compose full-stack runtime, routing, and profile persistence\n'

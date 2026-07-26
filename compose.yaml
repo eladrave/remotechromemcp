@@ -37,14 +37,24 @@ services:
       browser:
         condition: service_healthy
     ports:
-      - "80:80"
-      - "443:443"
+      - "${PROXY_BIND_ADDRESS:-0.0.0.0}:${PROXY_HTTP_PORT:-80}:80"
+      - "${PROXY_BIND_ADDRESS:-0.0.0.0}:${PROXY_HTTPS_PORT:-443}:443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
     networks:
       - browser-net
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- --header=\"Host: $${DOMAIN}\" http://127.0.0.1/healthz | grep -qx ready",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
 
 networks:
   browser-net:

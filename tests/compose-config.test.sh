@@ -117,9 +117,11 @@ assert.match(browser, /^\s{4}init: true$/m);
 assert.match(browser, /^\s{4}restart: unless-stopped$/m);
 assert.match(browser, /^\s{4}shm_size:/m);
 assert.match(browser, /chrome-profile:\/data\/chrome-profile/);
-assert.match(proxy, /^\s{4}ports:\n\s{6}- "80:80"\n\s{6}- "443:443"/m);
+assert.match(proxy, /\$\{PROXY_BIND_ADDRESS:-0\.0\.0\.0\}:\$\{PROXY_HTTP_PORT:-80\}:80/);
+assert.match(proxy, /\$\{PROXY_BIND_ADDRESS:-0\.0\.0\.0\}:\$\{PROXY_HTTPS_PORT:-443\}:443/);
 assert.doesNotMatch(proxy, /"(5900|6080|8931|9222):/);
 assert.match(proxy, /condition: service_healthy/);
+assert.match(proxy, /http:\/\/127\.0\.0\.1\/healthz/);
 assert.match(proxy, /caddy-data:\/data/);
 assert.match(proxy, /caddy-config:\/config/);
 assert.match(compose, /^  chrome-profile:\s*$/m);
@@ -193,6 +195,10 @@ assert_contains docker/healthcheck.sh '127\.0\.0\.1:8931/mcp' \
   'health check must initialize MCP'
 assert_contains docker/healthcheck.sh 'REMOTE_CHROME_PLAYBOOK_VERSION=1' \
   'health check must verify injected MCP instructions'
+assert_contains docker/healthcheck.sh 'Mcp-Session-Id:' \
+  'health check must capture the initialized MCP session'
+assert_contains docker/healthcheck.sh '--request DELETE' \
+  'health check must close the initialized MCP session'
 assert_contains docker/healthcheck.sh '127\.0\.0\.1:6080' \
   'health check must inspect noVNC'
 
