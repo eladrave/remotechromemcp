@@ -563,6 +563,10 @@ native_backup_profile_once() {
     native_success "Reusing protected profile backup at $completed_archive"
     return 0
   fi
+  if [[ -f "$MIGRATION_MARKER" ]]; then
+    native_success "Headed migration already completed; no late profile backup requested"
+    return 0
+  fi
   if [[ "$skip_backup" == 1 ]]; then
     native_warn "Profile backup explicitly skipped for first headed migration"
     return

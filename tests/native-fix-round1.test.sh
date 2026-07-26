@@ -184,6 +184,31 @@ test_absent_units_satisfy_stop_requirement() {
   PATH="$fake_bin:$PATH" REMOTE_CHROME_DRY_RUN=0 native_stop_active_browser
 }
 
+test_successful_skip_prevents_late_profile_backup() {
+  local sandbox="$test_root/durable-skip"
+  prepare_profile_and_token "$sandbox"
+  env -u DOMAIN -u CERTBOT_EMAIL -u EMAIL \
+    REMOTE_CHROME_DRY_RUN=1 \
+    REMOTE_CHROME_ROOT="$sandbox" \
+    REMOTE_CHROME_HOME="$sandbox/home" \
+    CHROME_BIN=/bin/true \
+    PLAYWRIGHT_MCP_BIN=/bin/true \
+    bash "$root_dir/setup.sh" \
+      --non-interactive \
+      --domain chrome.example.test \
+      --email operator@example.test \
+      --skip-profile-backup >/dev/null || return 1
+
+  local migration_marker="$sandbox/home/.config/remote-chrome-headed-migration"
+  local backup_marker="$sandbox/home/.config/remote-chrome-profile-backup-complete"
+  [[ -f "$migration_marker" && ! -e "$backup_marker" ]] || return 1
+
+  run_setup "$sandbox" chrome.example.test >/dev/null || return 1
+  [[ ! -e "$backup_marker" ]] || return 1
+  [[ "$(find "$sandbox/home/.config/remote-chrome-backups" \
+    -maxdepth 1 -name 'chrome-mcp-profile-*.tar.gz' | wc -l)" == 0 ]]
+}
+
 test_rollback_runtime_order_and_prior_state() {
   local sandbox="$test_root/rollback"
   local log="$sandbox/commands.log"
@@ -280,6 +305,8 @@ run_test uninstall_rejects_dry_run_escape test_uninstall_rejects_dry_run_escape
 run_test profile_deletion_target_matrix test_profile_deletion_target_matrix
 run_test backup_marker_collision_and_stop_failure test_backup_marker_collision_and_stop_failure
 run_test absent_units_satisfy_stop_requirement test_absent_units_satisfy_stop_requirement
+run_test successful_skip_prevents_late_profile_backup \
+  test_successful_skip_prevents_late_profile_backup
 run_test rollback_runtime_order_and_prior_state test_rollback_runtime_order_and_prior_state
 run_test status_initialize_validation test_status_initialize_validation
 run_test domain_change_preserves_credentials_and_updates_url \
