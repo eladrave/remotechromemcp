@@ -64,7 +64,15 @@ playwright_service="$systemd/playwright-mcp.service"
 
 assert_contains "$chrome_service" "Environment=DISPLAY=:99"
 assert_not_contains "$chrome_service" "--headless"
+assert_not_contains "$chrome_service" "--no-sandbox"
+assert_not_contains "$chrome_service" "User="
 assert_contains "$playwright_service" "Environment=NODE_OPTIONS=--require=/opt/remotechromemcp/lib/inject-instructions.cjs"
+
+for service in "$systemd"/*.service; do
+  assert_contains "$service" "WantedBy=default.target"
+  assert_not_contains "$service" "WantedBy=multi-user.target"
+  assert_not_contains "$service" "network.target"
+done
 
 assert_contains "$nginx" "location /login/"
 assert_contains "$nginx" "auth_basic "
