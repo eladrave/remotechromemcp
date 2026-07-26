@@ -14,6 +14,7 @@ vm_log() {
 vm_log_command() {
   local command_log=${COMMAND_LOG:-}
   [[ -n $command_log ]] || return 0
+  vm_require_confined_destination "$command_log" || return 1
   {
     printf '%s' "$1"
     shift
@@ -24,7 +25,7 @@ vm_log_command() {
 
 vm_run_mutation() {
   if [[ ${REMOTE_CHROME_DRY_RUN:-0} == 1 ]]; then
-    vm_log_command "$@"
+    vm_log_command "$@" || return 1
     return 0
   fi
   "$@"

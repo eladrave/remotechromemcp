@@ -100,6 +100,13 @@ export ALL_COMMAND_LOG="$all_command_log"
 export REMOTE_CHROME_FAKE_BIN="$fake_bin"
 export PATH="$fake_bin:$PATH"
 
+set_command_log_root() {
+  local root=$1
+  command_log="$root/commands.log"
+  : >"$command_log"
+  export COMMAND_LOG="$command_log"
+}
+
 REMOTE_CHROME_SKIP_MAIN=1
 # shellcheck source=../vminstall/installer-main.sh
 source vminstall/installer-main.sh
@@ -149,9 +156,10 @@ for matrix_row in \
   'ubuntu-24.04 ubuntu 24.04 noble' \
   'debian-12 debian 12 bookworm'; do
   read -r fixture os_id version codename <<<"$matrix_row"
-  reset_fakes
   fixture_root="$test_root/matrix-$fixture"
   mkdir "$fixture_root"
+  set_command_log_root "$fixture_root"
+  reset_fakes
   REMOTE_CHROME_DRY_RUN=1
   REMOTE_CHROME_TEST_ROOT="$fixture_root"
   REMOTE_CHROME_OS_RELEASE="tests/fixtures/os-release-$fixture"
@@ -190,9 +198,10 @@ for matrix_row in \
     fail "$fixture must verify the Compose plugin last"
 done
 
-reset_fakes
 arch_root="$test_root/unsupported-arch"
 mkdir "$arch_root"
+set_command_log_root "$arch_root"
+reset_fakes
 REMOTE_CHROME_DRY_RUN=1
 REMOTE_CHROME_TEST_ROOT="$arch_root"
 REMOTE_CHROME_OS_RELEASE=tests/fixtures/os-release-ubuntu-24.04
@@ -208,10 +217,11 @@ set -e
 [[ $arch_status -ne 0 ]] || fail 'Docker installation must reject non-amd64 dpkg architecture'
 assert_no_mutations
 
-reset_fakes
 descendant_root="$test_root/descendant-root"
 descendant_escape="$test_root/descendant-escape"
 mkdir "$descendant_root" "$descendant_escape"
+set_command_log_root "$descendant_root"
+reset_fakes
 REMOTE_CHROME_DRY_RUN=1
 REMOTE_CHROME_TEST_ROOT="$descendant_root"
 REMOTE_CHROME_OS_RELEASE=tests/fixtures/os-release-ubuntu-24.04
@@ -229,6 +239,58 @@ set -e
 [[ -z $(find "$descendant_escape" -mindepth 1 -print -quit) ]] ||
   fail 'dry-run Docker writes must not follow a descendant symlink outside the fixture root'
 
+log_canary_root="$test_root/log-canary-root"
+log_canary_escape="$test_root/log-canary-escape"
+mkdir "$log_canary_root" "$log_canary_escape"
+REMOTE_CHROME_DRY_RUN=1
+REMOTE_CHROME_TEST_ROOT="$log_canary_root"
+vm_init_paths
+
+absolute_command_log="$test_root/absolute-command.log"
+command_log="$absolute_command_log"
+export COMMAND_LOG="$command_log"
+external_commands_before="$(wc -l <"$all_command_log")"
+set +e
+vm_run_mutation apt-get update \
+  >"$test_root/absolute-command.stdout" \
+  2>"$test_root/absolute-command.stderr"
+absolute_command_status=$?
+set -e
+[[ $absolute_command_status -ne 0 ]] ||
+  fail 'dry-run mutation must reject an absolute command log outside the canonical test root'
+[[ ! -e "$absolute_command_log" ]] ||
+  fail 'rejected absolute command log must not be written'
+[[ $(wc -l <"$all_command_log") -eq $external_commands_before ]] ||
+  fail 'invalid absolute command log must fail before external mutation'
+
+ln -s ../log-canary-escape "$log_canary_root/logs"
+command_log="$log_canary_root/logs/commands.log"
+export COMMAND_LOG="$command_log"
+set +e
+vm_run_mutation apt-get update \
+  >"$test_root/symlink-command.stdout" \
+  2>"$test_root/symlink-command.stderr"
+symlink_command_status=$?
+set -e
+[[ $symlink_command_status -ne 0 ]] ||
+  fail 'dry-run mutation must reject a descendant-symlink command log escape'
+[[ ! -e "$log_canary_escape/commands.log" ]] ||
+  fail 'rejected descendant-symlink command log must not be written'
+[[ $(wc -l <"$all_command_log") -eq $external_commands_before ]] ||
+  fail 'invalid descendant-symlink command log must fail before external mutation'
+
+normal_command_log="$test_root/normal-command.log"
+(
+  unset REMOTE_CHROME_TEST_ROOT REMOTE_CHROME_CANONICAL_TEST_ROOT
+  REMOTE_CHROME_DRY_RUN=0
+  COMMAND_LOG="$normal_command_log"
+  export REMOTE_CHROME_DRY_RUN COMMAND_LOG
+  vm_log_command normal-non-test command
+)
+grep -Fxq 'normal-non-test <command>' "$normal_command_log" ||
+  fail 'normal non-test command logging behavior must be preserved'
+
+set_command_log_root "$test_root"
 reset_fakes
 FAKE_DOCKER_PRESENT=1
 export FAKE_DOCKER_PRESENT
