@@ -110,15 +110,11 @@ server {
     listen ${MCP_PUBLIC_PORT};
     listen [::]:${MCP_PUBLIC_PORT};
 
-    location / {
-        if (\$mcp_auth_ok = 0) {
-            return 401 '{"error":"Unauthorized"}';
-        }
-
-        proxy_pass         http://127.0.0.1:${MCP_INTERNAL_PORT};
+    # ── Auth method 1: token in URL path ─────────────────────────
+    # Usage: http://<host>:${MCP_PUBLIC_PORT}/<token>/mcp
+    location = /${BEARER_TOKEN}/mcp {
+        proxy_pass         http://127.0.0.1:${MCP_INTERNAL_PORT}/mcp;
         proxy_http_version 1.1;
-
-        # Required for HTTP streaming / SSE
         proxy_set_header   Host "localhost:${MCP_INTERNAL_PORT}";
         proxy_set_header   Connection "";
         proxy_set_header   X-Real-IP \$remote_addr;
@@ -126,7 +122,25 @@ server {
         proxy_cache        off;
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
+        add_header Content-Type application/json always;
+    }
 
+    # ── Auth method 2: Authorization: Bearer <token> header ───────
+    # Usage: http://<host>:${MCP_PUBLIC_PORT}/mcp
+    location / {
+        if (\$mcp_auth_ok = 0) {
+            return 401 '{"error":"Unauthorized"}';
+        }
+
+        proxy_pass         http://127.0.0.1:${MCP_INTERNAL_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header   Host "localhost:${MCP_INTERNAL_PORT}";
+        proxy_set_header   Connection "";
+        proxy_set_header   X-Real-IP \$remote_addr;
+        proxy_buffering    off;
+        proxy_cache        off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
         add_header Content-Type application/json always;
     }
 }
@@ -331,7 +345,7 @@ map \$http_authorization \$mcp_auth_ok {
     default                  0;
 }
 
-# HTTP → HTTPS redirect
+# HTTP \u2192 HTTPS redirect
 server {
     listen 80;
     listen [::]:80;
@@ -341,7 +355,7 @@ server {
     location / { return 301 https://\$host\$request_uri; }
 }
 
-# HTTPS — MCP endpoint
+# HTTPS \u2014 MCP endpoint
 server {
     listen 443 ssl;
     listen [::]:443 ssl;
@@ -352,14 +366,11 @@ server {
     ssl_protocols       TLSv1.2 TLSv1.3;
     ssl_ciphers         HIGH:!aNULL:!MD5;
 
-    location / {
-        if (\$mcp_auth_ok = 0) {
-            return 401 '{"error":"Unauthorized"}';
-        }
-
-        proxy_pass         http://127.0.0.1:${MCP_INTERNAL_PORT};
+    # \u2500\u2500 Auth method 1: token in URL path \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    # Usage: https://${DOMAIN}/<token>/mcp
+    location = /${BEARER_TOKEN}/mcp {
+        proxy_pass         http://127.0.0.1:${MCP_INTERNAL_PORT}/mcp;
         proxy_http_version 1.1;
-
         proxy_set_header   Host "localhost:${MCP_INTERNAL_PORT}";
         proxy_set_header   Connection "";
         proxy_set_header   X-Real-IP \$remote_addr;
@@ -367,7 +378,25 @@ server {
         proxy_cache        off;
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
+        add_header Content-Type application/json always;
+    }
 
+    # \u2500\u2500 Auth method 2: Authorization: Bearer <token> header \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    # Usage: https://${DOMAIN}/mcp
+    location / {
+        if (\$mcp_auth_ok = 0) {
+            return 401 '{"error":"Unauthorized"}';
+        }
+
+        proxy_pass         http://127.0.0.1:${MCP_INTERNAL_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header   Host "localhost:${MCP_INTERNAL_PORT}";
+        proxy_set_header   Connection "";
+        proxy_set_header   X-Real-IP \$remote_addr;
+        proxy_buffering    off;
+        proxy_cache        off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
         add_header Content-Type application/json always;
     }
 }
