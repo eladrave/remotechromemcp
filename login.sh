@@ -1,56 +1,47 @@
 #!/usr/bin/env bash
-# login.sh — Open Chrome headed with the MCP profile for manual login.
-# Stops the MCP services, opens headed Chrome so you can log in to sites,
-# then restarts the services when you close Chrome.
+# login.sh — hand a human the authenticated remote Chrome login console.
 set -euo pipefail
 
-CHROME_BIN="${CHROME_BIN:-/usr/bin/google-chrome}"
-CHROME_MCP_PROFILE="${CHROME_MCP_PROFILE:-$HOME/.config/chrome-mcp-profile}"
+remote_root="${REMOTE_CHROME_ROOT:-/}"
+if [[ "$remote_root" == "/" ]]; then
+  remote_home="${REMOTE_CHROME_HOME:-$HOME}"
+else
+  remote_home="${REMOTE_CHROME_HOME:-${remote_root%/}/home}"
+fi
+login_env_file="${LOGIN_ENV_FILE:-$remote_home/.config/remote-chrome-login.env}"
 
-echo "════════════════════════════════════════════════════════"
-echo "  Remote Chrome MCP — Login Mode"
-echo "════════════════════════════════════════════════════════"
-echo ""
-echo "This will:"
-echo "  1. Stop the MCP services (chrome-mcp + playwright-mcp)"
-echo "  2. Open Chrome headed with your MCP profile"
-echo "  3. Restart the services after you close Chrome"
-echo ""
-read -rp "Press Enter to continue, or Ctrl-C to cancel..."
+if [[ ! -f "$login_env_file" ]]; then
+  printf 'Login credentials are not configured at %s. Run ./setup.sh first.\n' \
+    "$login_env_file" >&2
+  exit 1
+fi
 
-echo ""
-echo "▶ Stopping MCP services..."
-systemctl --user stop playwright-mcp.service 2>/dev/null || true
-systemctl --user stop chrome-mcp.service 2>/dev/null || true
-sleep 1
+# shellcheck disable=SC1090
+source "$login_env_file"
+if [[ -z "${LOGIN_URL-}" || -z "${LOGIN_USERNAME-}" || -z "${LOGIN_PASSWORD-}" ]]; then
+  printf 'Login credential file is incomplete: %s\n' "$login_env_file" >&2
+  exit 1
+fi
 
-# Remove singleton locks left by the stopped service
-rm -f "$CHROME_MCP_PROFILE"/Singleton*
+cat <<EOF
+Remote Chrome login console
 
-echo "✓ Services stopped."
-echo ""
-echo "▶ Opening Chrome with your MCP profile..."
-echo "  Log in to any sites you need, then CLOSE Chrome to continue."
-echo ""
+URL: $LOGIN_URL
+Username: $LOGIN_USERNAME
 
-"$CHROME_BIN" \
-  --user-data-dir="$CHROME_MCP_PROFILE" \
-  --no-first-run \
-  --no-default-browser-check \
-  --new-window \
-  2>/dev/null || true
+The password remains in $login_env_file and is not displayed.
+Use the console to complete sign-in, MFA, CAPTCHA, or other human-only steps.
+Chrome and Playwright MCP remain running while you use it.
+EOF
 
-echo ""
-echo "▶ Chrome closed. Removing singleton locks and restarting services..."
-rm -f "$CHROME_MCP_PROFILE"/Singleton*
+if [[ -n "${DISPLAY-}${WAYLAND_DISPLAY-}" ]] && command -v xdg-open >/dev/null 2>&1; then
+  if xdg-open "$LOGIN_URL" >/dev/null 2>&1 & then
+    printf 'Opened the login console in your graphical session.\n'
+  fi
+else
+  cat <<EOF
 
-systemctl --user start chrome-mcp.service
-sleep 5
-systemctl --user start playwright-mcp.service
-sleep 3
-
-echo "✓ Services restarted."
-echo ""
-systemctl --user status chrome-mcp.service playwright-mcp.service --no-pager -l | grep -E "Active:|●"
-echo ""
-echo "✓ Login session complete. Your new cookies are now available to the MCP server."
+SSH-only session detected: open the URL above in a browser on your own
+computer, then enter the stored username and password.
+EOF
+fi
