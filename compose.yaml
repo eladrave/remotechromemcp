@@ -1,0 +1,56 @@
+services:
+  browser:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        PLAYWRIGHT_MCP_VERSION: ${PLAYWRIGHT_MCP_VERSION:?set PLAYWRIGHT_MCP_VERSION}
+    environment:
+      SCREEN_GEOMETRY: ${SCREEN_GEOMETRY:-1440x900x24}
+    init: true
+    restart: unless-stopped
+    shm_size: "2gb"
+    volumes:
+      - chrome-profile:/data/chrome-profile
+    expose:
+      - "6080"
+      - "8931"
+    networks:
+      - browser-net
+    healthcheck:
+      test: ["CMD", "/opt/remote-chrome/healthcheck.sh"]
+      interval: 15s
+      timeout: 12s
+      retries: 8
+      start_period: 20s
+
+  proxy:
+    image: caddy:2-alpine
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN}
+      MCP_TOKEN: ${MCP_TOKEN:?set MCP_TOKEN}
+      LOGIN_USERNAME: ${LOGIN_USERNAME:?set LOGIN_USERNAME}
+      LOGIN_PASSWORD_HASH: ${LOGIN_PASSWORD_HASH:?set LOGIN_PASSWORD_HASH}
+    init: true
+    restart: unless-stopped
+    depends_on:
+      browser:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - browser-net
+
+networks:
+  browser-net:
+    driver: bridge
+
+volumes:
+  chrome-profile:
+  caddy-data:
+  caddy-config:

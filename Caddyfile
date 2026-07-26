@@ -1,0 +1,54 @@
+{$DOMAIN} {
+	# Secret-bearing compatibility paths must never reach an access log.
+	log {
+		output discard
+	}
+
+	@mcp_unsupported {
+		path /mcp /{$MCP_TOKEN}/mcp
+		not method POST DELETE
+	}
+	handle @mcp_unsupported {
+		respond 405
+	}
+
+	@mcp_bearer {
+		path /mcp
+		method POST DELETE
+		header Authorization "Bearer {$MCP_TOKEN}"
+	}
+	handle @mcp_bearer {
+		reverse_proxy browser:8931
+	}
+
+	@mcp_unauthorized {
+		path /mcp
+		method POST DELETE
+	}
+	handle @mcp_unauthorized {
+		respond 401
+	}
+
+	@mcp_token_path {
+		path /{$MCP_TOKEN}/mcp
+		method POST DELETE
+	}
+	handle @mcp_token_path {
+		rewrite * /mcp
+		reverse_proxy browser:8931
+	}
+
+	handle_path /login/* {
+		basic_auth {
+			{$LOGIN_USERNAME} {$LOGIN_PASSWORD_HASH}
+		}
+		reverse_proxy browser:6080 {
+			header_up Connection {http.request.header.Connection}
+			header_up Upgrade {http.request.header.Upgrade}
+		}
+	}
+
+	handle {
+		respond 404
+	}
+}

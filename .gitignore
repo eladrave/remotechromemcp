@@ -1,5 +1,10 @@
 .worktrees/
 node_modules/
 .env
+.env.*
+!.env.example
 *.htpasswd
 chrome-mcp-profile-*.tar.gz
+caddy-data/
+caddy-config/
+chrome-profile/
