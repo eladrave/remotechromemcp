@@ -1,15 +1,15 @@
 # remotechromemcp
 
-Exposes a [Playwright MCP](https://github.com/microsoft/playwright-mcp) server backed by **your real Chrome profile** (with your saved logins and cookies) over HTTP with bearer token authentication. Intended for remote AI agents (Warp Oz, ChatGPT, Codex, etc.) that need to browse the web as you.
+Exposes a [Playwright MCP](https://github.com/microsoft/playwright-mcp) server backed by **your real Chrome profile** (with your saved logins and cookies) over **HTTPS** with bearer token authentication. Intended for remote AI agents (Warp Oz, ChatGPT, Codex, etc.) that need to browse the web as you.
 
 ## Architecture
 
 ```
 Remote MCP client
-        │  HTTP  Authorization: Bearer <token>
+        │  HTTPS  Authorization: Bearer <token>
         ▼
-  nginx :8932  ──── bearer token check ────► 401 if invalid
-        │
+  nginx :443  (TLS — Let's Encrypt)  ──── bearer token check ────► 401 if invalid
+        │                                 HTTP :80 → redirects to HTTPS
         │  proxy_pass (internal)
         ▼
   Playwright MCP  :8931
@@ -27,6 +27,8 @@ All three components run as systemd user services that start automatically at bo
 - Google Chrome installed (`/usr/bin/google-chrome`)
 - Node.js + npx
 - nginx (`sudo apt install nginx`)
+- certbot + python3-certbot-nginx (`sudo apt install certbot python3-certbot-nginx`)
+- A domain name with an A record pointing to your server's public IP
 - `sudo` access (for nginx config and global npm install)
 - `openssl`, `curl`
 
@@ -46,7 +48,7 @@ The script will print your endpoint URL and bearer token when done.
 1. Copies `~/.config/google-chrome` → `~/.config/chrome-mcp-profile` (one-time, skipped if exists)
 2. Generates a 256-bit bearer token and saves it to `~/.config/mcp-bearer-token.env`
 3. Installs `@playwright/mcp` globally via npm
-4. Writes an nginx site config on port `8932` that validates the bearer token and proxies (with streaming support) to Playwright MCP
+4. Writes an nginx site config on port `8932` (HTTP) that validates the bearer token and proxies (with streaming support) to Playwright MCP
 5. Creates two systemd user services: `chrome-mcp` and `playwright-mcp`
 6. Enables both services and runs `loginctl enable-linger` so they survive logout
 7. Starts everything and runs a smoke test
@@ -64,12 +66,58 @@ All defaults can be overridden:
 | `MCP_INTERNAL_PORT` | `8931` | Playwright MCP port (internal) |
 | `MCP_PUBLIC_PORT` | `8932` | nginx public port |
 
+## HTTPS Setup (recommended for public internet)
+
+After running `setup.sh`, secure the endpoint with a Let's Encrypt certificate:
+
+```bash
+# 1. Install certbot
+sudo apt install -y certbot python3-certbot-nginx
+
+# 2. Obtain certificate (port 80 must be reachable)
+sudo certbot certonly --nginx -d <your-domain> --non-interactive --agree-tos -m <your-email>
+
+# 3. Write HTTPS nginx config (replace token, domain, and internal port as needed)
+sudo tee /etc/nginx/sites-available/playwright-mcp > /dev/null << 'EOF'
+map $http_authorization $mcp_auth_ok {
+    "Bearer <your-token>" 1;
+    default               0;
+}
+server {
+    listen 80; listen [::]:80;
+    server_name <your-domain>;
+    location /.well-known/acme-challenge/ { root /var/www/html; }
+    location / { return 301 https://$host$request_uri; }
+}
+server {
+    listen 443 ssl; listen [::]:443 ssl;
+    server_name <your-domain>;
+    ssl_certificate     /etc/letsencrypt/live/<your-domain>/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/<your-domain>/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    location / {
+        if ($mcp_auth_ok = 0) { return 401 '{"error":"Unauthorized"}'; }
+        proxy_pass         http://127.0.0.1:8931;
+        proxy_http_version 1.1;
+        proxy_set_header   Host "localhost:8931";
+        proxy_set_header   Connection "";
+        proxy_buffering    off; proxy_cache off;
+        proxy_read_timeout 3600s; proxy_send_timeout 3600s;
+        add_header Content-Type application/json always;
+    }
+}
+EOF
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+Certbot's systemd timer handles automatic renewal.
+
 ## Client Configuration
 
-After `setup.sh` completes, connect your MCP client to:
+Connect your MCP client to:
 
 ```
-http://<your-public-ip>:8932/mcp
+https://chrome.eladrave.com/mcp
 ```
 
 with the `Authorization: Bearer <token>` header.
@@ -80,7 +128,7 @@ Add to Warp's MCP settings (Settings → MCP Servers):
 
 ```json
 {
-  "url": "http://<your-public-ip>:8932/mcp",
+  "url": "https://chrome.eladrave.com/mcp",
   "headers": {
     "Authorization": "Bearer <token>"
   }
@@ -91,7 +139,7 @@ Add to Warp's MCP settings (Settings → MCP Servers):
 
 ```toml
 [mcp_servers.remote_chrome]
-url = "http://<your-public-ip>:8932/mcp"
+url = "https://chrome.eladrave.com/mcp"
 headers = { Authorization = "Bearer <token>" }
 tool_timeout_sec = 120
 ```
@@ -102,7 +150,7 @@ tool_timeout_sec = 120
 {
   "mcpServers": {
     "playwright": {
-      "url": "http://<your-public-ip>:8932/mcp",
+      "url": "https://chrome.eladrave.com/mcp",
       "headers": {
         "Authorization": "Bearer <token>"
       }
@@ -164,7 +212,7 @@ Removes services, nginx config, and the Chrome profile copy. Your original `~/.c
 
 - **CDP port 9222 is bound to `127.0.0.1` only** — never exposed publicly. CDP access is full control of that Chrome instance including all sessions and cookies.
 - The **bearer token is the only public-facing auth**. Keep it secret and rotate it by deleting `~/.config/mcp-bearer-token.env` and re-running `setup.sh`.
-- The endpoint is **plain HTTP** — suitable for trusted private networks or VPNs. For public Internet exposure, put it behind HTTPS (Cloudflare Tunnel, Caddy, certbot+nginx).
+- The endpoint is served over **HTTPS (TLS 1.2/1.3)** with a Let's Encrypt certificate that auto-renews every 90 days via certbot's systemd timer.
 - The Chrome MCP profile is a **copy** of your real profile. Cookies written during MCP sessions stay in the copy and do not affect your normal Chrome.
 
 ## Troubleshooting
