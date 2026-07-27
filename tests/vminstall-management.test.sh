@@ -86,9 +86,9 @@ apply_patch_fake() {
 }
 
 apply_patch_fake "$fake_bin/openssl" \
-  'printf "openssl" >>"$FAKE_COMMAND_LOG"' \
-  'printf " <%s>" "$@" >>"$FAKE_COMMAND_LOG"' \
-  'printf "\n" >>"$FAKE_COMMAND_LOG"' \
+  'command_line=openssl' \
+  'for argument in "$@"; do printf -v command_line "%s <%s>" "$command_line" "$argument"; done' \
+  'printf "%s\n" "$command_line" >>"$FAKE_COMMAND_LOG"' \
   'case "${1:-}:${2:-}:${3:-}" in' \
   '  rand:-hex:32)' \
   '    od -An -N32 -tx1 /dev/urandom | tr -d " \n"' \
@@ -113,9 +113,9 @@ apply_patch_fake "$fake_bin/openssl" \
   'esac'
 
 apply_patch_fake "$fake_bin/timeout" \
-  'printf "timeout" >>"$FAKE_COMMAND_LOG"' \
-  'printf " <%s>" "$@" >>"$FAKE_COMMAND_LOG"' \
-  'printf "\n" >>"$FAKE_COMMAND_LOG"' \
+  'command_line=timeout' \
+  'for argument in "$@"; do printf -v command_line "%s <%s>" "$command_line" "$argument"; done' \
+  'printf "%s\n" "$command_line" >>"$FAKE_COMMAND_LOG"' \
   '[[ ${1:-} == 5 ]] || exit 86' \
   'shift' \
   'exec "$@"'
@@ -145,6 +145,8 @@ apply_patch_fake "$fake_bin/docker" \
   '  else' \
   '    printf "browser healthy\nproxy healthy\n"' \
   '  fi' \
+  'elif [[ " $* " == *" compose "*" exec -T browser "* ]]; then' \
+  '  printf "%s\n" "Chrome/123.0.0.0" "Mozilla/5.0 Chrome/123.0.0.0" "Remote Browser Interaction Playbook"' \
   'elif [[ " $* " == *" compose "*" down"* && ${REMOTE_CHROME_FAKE_COMPOSE_DOWN_FAIL:-0} == 1 ]]; then' \
   '  printf "candidate shutdown failed\n" >&2' \
   '  exit 87' \
@@ -208,7 +210,7 @@ apply_patch_fake "$fake_bin/curl" \
   '    [[ $auth == "$bearer" && $data == *'\''"method":"initialize"'\''* ]] || exit 91' \
   '    status=200; event=initialize' \
   '    printf "HTTP/2 200\r\nContent-Type: application/json\r\nMcp-Session-Id: fixture-session\r\n\r\n" >"$headers"' \
-  '    printf "{}" >"$output"' \
+  '    printf "%s" '\''{"result":{"instructions":"Remote Browser Interaction Playbook"}}'\'' >"$output"' \
   '    ;;' \
   '  DELETE:https://chrome.example.com/mcp)' \
   '    [[ $auth == "$bearer" && $session == fixture-session ]] || exit 92' \
@@ -410,8 +412,15 @@ make_release() {
   if [[ -f vminstall/remote-chrome ]]; then
     cp vminstall/remote-chrome "$release/vminstall/remote-chrome"
     chmod +x "$release/vminstall/remote-chrome"
-    cp vminstall/lib/common.sh vminstall/lib/config.sh \
+    cp vminstall/install.sh "$release/vminstall/install.sh"
+    chmod +x "$release/vminstall/install.sh"
+    cp vminstall/remote-chrome.service.in "$release/vminstall/"
+    cp vminstall/lib/common.sh vminstall/lib/wizard.sh \
+      vminstall/lib/release.sh vminstall/lib/config.sh \
       vminstall/lib/activate.sh "$release/vminstall/lib/"
+    if [[ -f vminstall/lib/management.sh ]]; then
+      cp vminstall/lib/management.sh "$release/vminstall/lib/management.sh"
+    fi
   fi
 }
 
@@ -465,8 +474,10 @@ setup_activation_fixture() {
   if [[ -f vminstall/remote-chrome ]]; then
     cp vminstall/remote-chrome "$STAGED_RELEASE_DIR/vminstall/remote-chrome"
     chmod +x "$STAGED_RELEASE_DIR/vminstall/remote-chrome"
-    cp vminstall/lib/common.sh vminstall/lib/config.sh \
-      vminstall/lib/activate.sh "$STAGED_RELEASE_DIR/vminstall/lib/"
+    cp vminstall/lib/common.sh vminstall/lib/wizard.sh \
+      vminstall/lib/release.sh \
+      vminstall/lib/config.sh vminstall/lib/activate.sh \
+      vminstall/lib/management.sh "$STAGED_RELEASE_DIR/vminstall/lib/"
   fi
   REMOTE_CHROME_TRANSITION_LOG="$root/transitions.log"
   : >"$REMOTE_CHROME_TRANSITION_LOG"
@@ -628,8 +639,10 @@ printf 'services: {}\n' >"$STAGED_RELEASE_DIR/compose.yaml"
 printf 'services: {}\n' >"$STAGED_RELEASE_DIR/vminstall/compose.vm.yaml"
 cp vminstall/remote-chrome "$STAGED_RELEASE_DIR/vminstall/remote-chrome"
 chmod +x "$STAGED_RELEASE_DIR/vminstall/remote-chrome"
-cp vminstall/lib/common.sh vminstall/lib/config.sh \
-  vminstall/lib/activate.sh "$STAGED_RELEASE_DIR/vminstall/lib/"
+cp vminstall/lib/common.sh vminstall/lib/wizard.sh \
+  vminstall/lib/release.sh \
+  vminstall/lib/config.sh vminstall/lib/activate.sh \
+  vminstall/lib/management.sh "$STAGED_RELEASE_DIR/vminstall/lib/"
 : >"$REMOTE_CHROME_TRANSITION_LOG"
 : >"$fake_log"
 : >"$REMOTE_CHROME_PROTOCOL_LOG"
@@ -859,4 +872,349 @@ grep -Fq 'rollback health verification failed' \
   "$rollback_health_root/stderr" ||
   fail 'rollback health failure must be reported distinctly'
 
-printf 'PASS: VM protected configuration, activation, rollback, and handoff contracts\n'
+run_cli() {
+  local root=$1
+  shift
+  REMOTE_CHROME_TEST_ROOT="$root" \
+  REMOTE_CHROME_TEST_EUID="${REMOTE_CHROME_TEST_EUID:-0}" \
+  REMOTE_CHROME_FAKE_SYSTEMD_STATE="$root/systemd-state" \
+  REMOTE_CHROME_PROTOCOL_LOG="$root/protocol.log" \
+  REMOTE_CHROME_EXPECT_TOKEN=$(
+    read_env_value "$root/etc/remote-chrome/credentials.env" MCP_TOKEN
+  ) \
+  REMOTE_CHROME_EXPECT_USERNAME=$(
+    read_env_value "$root/etc/remote-chrome/credentials.env" LOGIN_USERNAME
+  ) \
+  REMOTE_CHROME_EXPECT_PASSWORD=$(
+    read_env_value "$root/etc/remote-chrome/credentials.env" LOGIN_PASSWORD
+  ) \
+    bash vminstall/remote-chrome "$@"
+}
+
+make_update_archive() {
+  local root=$1 ref=$2
+  local source="$root/update-source/remotechromemcp-$ref"
+  local archive="$root/remotechromemcp-$ref.tar.gz"
+  mkdir -p "$source/vminstall/lib"
+  cp compose.yaml "$source/compose.yaml"
+  cp vminstall/compose.vm.yaml vminstall/install.sh \
+    vminstall/remote-chrome vminstall/remote-chrome.service.in \
+    "$source/vminstall/"
+  cp vminstall/lib/common.sh vminstall/lib/wizard.sh \
+    vminstall/lib/release.sh vminstall/lib/config.sh \
+    vminstall/lib/activate.sh "$source/vminstall/lib/"
+  if [[ -f vminstall/lib/management.sh ]]; then
+    cp vminstall/lib/management.sh "$source/vminstall/lib/management.sh"
+  fi
+  chmod +x "$source/vminstall/install.sh" "$source/vminstall/remote-chrome"
+  tar -czf "$archive" -C "$root/update-source" "remotechromemcp-$ref"
+  (
+    cd "$root"
+    sha256sum "remotechromemcp-$ref.tar.gz" \
+      >"remotechromemcp-$ref.tar.gz.sha256"
+  )
+  printf '%s' "$archive"
+}
+
+cli_root="$test_root/management-cli"
+setup_activation_fixture "$cli_root"
+touch "$REMOTE_CHROME_DATA_DIR/profile/session-marker"
+printf '%s\n' '{"version":"fixture-backup"}' \
+  >"$REMOTE_CHROME_DATA_DIR/backups/20260727T120000Z.manifest"
+
+set +e
+run_cli "$cli_root" >"$cli_root/no-args.stdout" \
+  2>"$cli_root/no-args.stderr"
+no_args_status=$?
+run_cli "$cli_root" unsupported >"$cli_root/unknown.stdout" \
+  2>"$cli_root/unknown.stderr"
+unknown_status=$?
+set -e
+[[ $no_args_status -eq 2 && $unknown_status -eq 2 ]] ||
+  fail 'missing and unknown CLI commands must exit 2'
+grep -Fq 'Usage: remote-chrome' "$cli_root/no-args.stderr" ||
+  fail 'missing CLI command must print usage'
+grep -Fq 'Usage: remote-chrome' "$cli_root/unknown.stderr" ||
+  fail 'unknown CLI command must print usage'
+
+: >"$REMOTE_CHROME_PROTOCOL_LOG"
+run_cli "$cli_root" status >"$cli_root/status.stdout" \
+  2>"$cli_root/status.stderr"
+for status_text in \
+  'Active release: v1.0.0' \
+  'Prior release: none' \
+  'Service: active' \
+  'Browser container: healthy' \
+  'Proxy container: healthy' \
+  'Chrome version: Chrome/123.0.0.0' \
+  'Headed Chrome: yes' \
+  'MCP initialize: ready' \
+  'Playbook marker: present' \
+  'Public MCP anonymous/authenticated: 401/405' \
+  'MCP Content-Type headers: 1' \
+  'Login HTTP: 200 with Basic auth' \
+  'Login WebSocket: 101' \
+  'TLS issuer: CN = Fixture Test CA' \
+  'TLS expires: Jul 27 12:00:00 2027 GMT' \
+  'Profile usage:' \
+  'Data usage:' \
+  'Last backup manifest: 20260727T120000Z.manifest'; do
+  grep -Fq "$status_text" "$cli_root/status.stdout" ||
+    fail "status report missing redacted field: $status_text"
+done
+cli_token=$(read_env_value \
+  "$cli_root/etc/remote-chrome/credentials.env" MCP_TOKEN)
+cli_password=$(read_env_value \
+  "$cli_root/etc/remote-chrome/credentials.env" LOGIN_PASSWORD)
+cli_hash=$(read_env_value \
+  "$cli_root/etc/remote-chrome/compose.env" LOGIN_PASSWORD_HASH)
+for secret in "$cli_token" "$cli_password" "$cli_hash"; do
+  ! grep -Fq -- "$secret" "$cli_root/status.stdout" ||
+    fail 'status must not print installed secrets'
+  ! grep -Fq -- "$secret" "$cli_root/status.stderr" ||
+    fail 'status diagnostics must not print installed secrets'
+done
+
+set +e
+REMOTE_CHROME_TEST_EUID=1000 run_cli "$cli_root" credentials \
+  >"$cli_root/credentials-nonroot.stdout" \
+  2>"$cli_root/credentials-nonroot.stderr"
+credentials_nonroot_status=$?
+set -e
+[[ $credentials_nonroot_status -eq 77 ]] ||
+  fail 'credentials must reject non-root callers with exit 77'
+[[ ! -s $cli_root/credentials-nonroot.stdout ]] ||
+  fail 'non-root credentials must not print connection fields'
+
+if [[ $EUID -ne 0 ]]; then
+  set +e
+  (
+    unset REMOTE_CHROME_TEST_ROOT REMOTE_CHROME_CANONICAL_TEST_ROOT
+    REMOTE_CHROME_TEST_EUID=0 vm_require_root
+  ) >"$cli_root/test-euid-bypass.stdout" \
+    2>"$cli_root/test-euid-bypass.stderr"
+  test_euid_bypass_status=$?
+  set -e
+  [[ $test_euid_bypass_status -eq 77 ]] ||
+    fail 'REMOTE_CHROME_TEST_EUID must not bypass root outside a test root'
+fi
+
+run_cli "$cli_root" credentials >"$cli_root/credentials-root.stdout"
+cmp -s "$cli_root/etc/remote-chrome/credentials.env" \
+  "$cli_root/credentials-root.stdout" ||
+  fail 'root credentials output must exactly match installed connection fields'
+run_cli "$cli_root" login >"$cli_root/login.stdout"
+grep -Fxq 'Login URL: https://chrome.example.com/login/' \
+  "$cli_root/login.stdout" ||
+  fail 'login must print the installed URL'
+grep -Fxq 'Login username: remotechrome' "$cli_root/login.stdout" ||
+  fail 'login must print the installed username'
+! grep -Fq -- "$cli_password" "$cli_root/login.stdout" ||
+  fail 'login must never print the password'
+! grep -Fq -- "$cli_token" "$cli_root/login.stdout" ||
+  fail 'login must never print the token'
+
+: >"$REMOTE_CHROME_PROTOCOL_LOG"
+run_cli "$cli_root" wait-ready >"$cli_root/wait-ready.stdout" \
+  2>"$cli_root/wait-ready.stderr"
+[[ $(<"$REMOTE_CHROME_PROTOCOL_LOG") == \
+  $'initialize\ndelete\nget-405\nlogin-401\nlogin-200\nwebsocket-101' ]] ||
+  fail 'wait-ready must require MCP, Basic login, and WebSocket readiness'
+[[ ! -s $cli_root/wait-ready.stdout ]] ||
+  fail 'wait-ready must remain quiet on success'
+for secret in "$cli_token" "$cli_password" "$cli_hash"; do
+  ! grep -Fq -- "$secret" "$cli_root/wait-ready.stderr" ||
+    fail 'wait-ready must not print installed secrets'
+done
+
+for unavailable_command in backup restore; do
+  set +e
+  run_cli "$cli_root" "$unavailable_command" \
+    >"$cli_root/$unavailable_command.stdout" \
+    2>"$cli_root/$unavailable_command.stderr"
+  unavailable_status=$?
+  set -e
+  [[ $unavailable_status -eq 69 &&
+     ! -s $cli_root/$unavailable_command.stdout ]] ||
+    fail "$unavailable_command must report unavailable without false success"
+  grep -Fq 'unavailable until backup support is installed' \
+    "$cli_root/$unavailable_command.stderr" ||
+    fail "$unavailable_command must explain its Task 6 boundary"
+done
+
+set +e
+run_cli "$cli_root" update >"$cli_root/update-missing.stdout" \
+  2>"$cli_root/update-missing.stderr"
+update_missing_status=$?
+run_cli "$cli_root" update --version master \
+  >"$cli_root/update-master.stdout" 2>"$cli_root/update-master.stderr"
+update_master_status=$?
+set -e
+[[ $update_missing_status -eq 2 ]] ||
+  fail 'update without --version must exit 2'
+[[ $update_master_status -eq 2 ]] ||
+  fail 'master update must require --allow-unpinned'
+
+update_archive=$(make_update_archive "$cli_root" v1.0.1)
+: >"$REMOTE_CHROME_PROTOCOL_LOG"
+REMOTE_CHROME_RELEASE_ARCHIVE="$update_archive" \
+  run_cli "$cli_root" update --version v1.0.1 \
+  >"$cli_root/update.stdout" 2>"$cli_root/update.stderr"
+[[ $(<"$cli_root/etc/remote-chrome/active-version") == v1.0.1 &&
+   $(readlink "$cli_root/opt/remotechromemcp/current") == \
+     releases/v1.0.1 ]] ||
+  fail 'verified pinned update must activate the requested release'
+
+rollback_archive=$(make_update_archive "$cli_root" v1.0.2)
+set +e
+REMOTE_CHROME_FAIL_AT=service-started \
+REMOTE_CHROME_RELEASE_ARCHIVE="$rollback_archive" \
+  run_cli "$cli_root" update --version v1.0.2 \
+  >"$cli_root/update-rollback.stdout" \
+  2>"$cli_root/update-rollback.stderr"
+update_rollback_status=$?
+set -e
+[[ $update_rollback_status -ne 0 &&
+   $(<"$cli_root/etc/remote-chrome/active-version") == v1.0.1 &&
+   $(readlink "$cli_root/opt/remotechromemcp/current") == \
+     releases/v1.0.1 &&
+   ! -e $cli_root/opt/remotechromemcp/releases/v1.0.2 ]] ||
+  fail 'failed update must reuse activation rollback and remove its release'
+
+master_archive=$(make_update_archive "$cli_root" master)
+REMOTE_CHROME_RELEASE_ARCHIVE="$master_archive" \
+  run_cli "$cli_root" update --version master --allow-unpinned \
+  >"$cli_root/update-master-allowed.stdout" \
+  2>"$cli_root/update-master-allowed.stderr"
+[[ $(<"$cli_root/etc/remote-chrome/active-version") == master &&
+   $(readlink "$cli_root/opt/remotechromemcp/current") == releases/master &&
+   $(read_env_value "$cli_root/etc/remote-chrome/install.env" DOMAIN) == \
+     chrome.example.com &&
+   $(read_env_value "$cli_root/etc/remote-chrome/install.env" \
+     RELEASE_VERIFICATION) == unpinned ]] ||
+  fail 'explicitly allowed master must activate without corrupting config'
+
+setup_uninstall_fixture() {
+  local root=$1
+  setup_activation_fixture "$root"
+  touch "$REMOTE_CHROME_DATA_DIR/profile/profile-marker" \
+    "$REMOTE_CHROME_DATA_DIR/backups/backup-marker" \
+    "$REMOTE_CHROME_DATA_DIR/data-marker"
+  printf 'chrome.example.com\n' >"$root/confirmation.tty"
+}
+
+default_uninstall_root="$test_root/uninstall-default"
+setup_uninstall_fixture "$default_uninstall_root"
+run_cli "$default_uninstall_root" uninstall \
+  >"$default_uninstall_root/uninstall.stdout" \
+  2>"$default_uninstall_root/uninstall.stderr"
+[[ ! -e $default_uninstall_root/opt/remotechromemcp &&
+   ! -e $default_uninstall_root/etc/systemd/system/remote-chrome.service &&
+   ! -e $default_uninstall_root/usr/local/sbin/remote-chrome ]] ||
+  fail 'default uninstall must remove releases, unit, and installed CLI'
+for preserved in \
+  "$default_uninstall_root/etc/remote-chrome/install.env" \
+  "$default_uninstall_root/var/lib/remote-chrome/profile/profile-marker" \
+  "$default_uninstall_root/var/lib/remote-chrome/backups/backup-marker"; do
+  [[ -e $preserved ]] ||
+    fail "default uninstall deleted preserved state: $preserved"
+done
+
+profile_uninstall_root="$test_root/uninstall-profile"
+setup_uninstall_fixture "$profile_uninstall_root"
+run_cli "$profile_uninstall_root" uninstall --delete-profile \
+  >"$profile_uninstall_root/uninstall.stdout" \
+  2>"$profile_uninstall_root/uninstall.stderr"
+[[ ! -e $profile_uninstall_root/var/lib/remote-chrome/profile &&
+   -e $profile_uninstall_root/var/lib/remote-chrome/backups/backup-marker &&
+   -e $profile_uninstall_root/var/lib/remote-chrome/data-marker &&
+   -e $profile_uninstall_root/etc/remote-chrome/install.env ]] ||
+  fail '--delete-profile must delete only the exact managed profile'
+
+backups_uninstall_root="$test_root/uninstall-backups"
+setup_uninstall_fixture "$backups_uninstall_root"
+run_cli "$backups_uninstall_root" uninstall --delete-backups \
+  >"$backups_uninstall_root/uninstall.stdout" \
+  2>"$backups_uninstall_root/uninstall.stderr"
+[[ ! -e $backups_uninstall_root/var/lib/remote-chrome/backups &&
+   -e $backups_uninstall_root/var/lib/remote-chrome/profile/profile-marker &&
+   -e $backups_uninstall_root/var/lib/remote-chrome/data-marker ]] ||
+  fail '--delete-backups must delete only the exact managed backups directory'
+
+all_data_uninstall_root="$test_root/uninstall-all-data"
+setup_uninstall_fixture "$all_data_uninstall_root"
+REMOTE_CHROME_TTY="$all_data_uninstall_root/confirmation.tty" \
+  run_cli "$all_data_uninstall_root" uninstall --delete-all-data \
+  >"$all_data_uninstall_root/uninstall.stdout" \
+  2>"$all_data_uninstall_root/uninstall.stderr"
+[[ ! -e $all_data_uninstall_root/var/lib/remote-chrome &&
+   ! -e $all_data_uninstall_root/etc/remote-chrome ]] ||
+  fail '--delete-all-data must delete exact configured data and config roots'
+
+wrong_confirmation_root="$test_root/uninstall-wrong-confirmation"
+setup_uninstall_fixture "$wrong_confirmation_root"
+printf 'wrong.example.com\n' >"$wrong_confirmation_root/confirmation.tty"
+set +e
+REMOTE_CHROME_TTY="$wrong_confirmation_root/confirmation.tty" \
+  run_cli "$wrong_confirmation_root" uninstall --delete-all-data \
+  >"$wrong_confirmation_root/uninstall.stdout" \
+  2>"$wrong_confirmation_root/uninstall.stderr"
+wrong_confirmation_status=$?
+set -e
+[[ $wrong_confirmation_status -ne 0 &&
+   -e $wrong_confirmation_root/opt/remotechromemcp &&
+   -e $wrong_confirmation_root/var/lib/remote-chrome/profile/profile-marker ]] ||
+  fail 'wrong domain confirmation must abort before uninstall mutation'
+
+for unsafe_case in root parent symlink override; do
+  unsafe_root="$test_root/uninstall-unsafe-$unsafe_case"
+  setup_uninstall_fixture "$unsafe_root"
+  unsafe_install="$unsafe_root/etc/remote-chrome/install.env"
+  case "$unsafe_case" in
+    root)
+      sed -i 's#^REMOTE_CHROME_DATA_DIR=.*#REMOTE_CHROME_DATA_DIR=/#' \
+        "$unsafe_install"
+      ;;
+    parent)
+      sed -i \
+        "s#^REMOTE_CHROME_DATA_DIR=.*#REMOTE_CHROME_DATA_DIR=$unsafe_root#" \
+        "$unsafe_install"
+      ;;
+    symlink)
+      mv "$unsafe_root/var/lib/remote-chrome" \
+        "$unsafe_root/var/lib/remote-chrome-real"
+      ln -s "$unsafe_root/var/lib/remote-chrome-real" \
+        "$unsafe_root/var/lib/remote-chrome"
+      ;;
+    override)
+      ;;
+  esac
+  set +e
+  if [[ $unsafe_case == override ]]; then
+    REMOTE_CHROME_CONFIG_ROOT="$unsafe_root/arbitrary-config" \
+      run_cli "$unsafe_root" uninstall --delete-profile \
+        "$unsafe_root/arbitrary-profile" \
+        >"$unsafe_root/uninstall.stdout" 2>"$unsafe_root/uninstall.stderr"
+  else
+    run_cli "$unsafe_root" uninstall --delete-all-data --force \
+      >"$unsafe_root/uninstall.stdout" 2>"$unsafe_root/uninstall.stderr"
+  fi
+  unsafe_status=$?
+  set -e
+  [[ $unsafe_status -ne 0 &&
+     -e $unsafe_root/opt/remotechromemcp &&
+     -e $unsafe_root/etc/systemd/system/remote-chrome.service ]] ||
+    fail "$unsafe_case deletion canary must abort before uninstall mutation"
+done
+
+invalid_test_root="$test_root/not-used"
+set +e
+REMOTE_CHROME_TEST_ROOT=/ \
+  bash vminstall/remote-chrome uninstall --delete-all-data --force \
+  >"$invalid_test_root.stdout" 2>"$invalid_test_root.stderr"
+invalid_test_root_status=$?
+set -e
+[[ $invalid_test_root_status -ne 0 ]] ||
+  fail 'CLI must reject a root REMOTE_CHROME_TEST_ROOT'
+
+printf 'PASS: VM protected configuration, activation, rollback, handoff, and management CLI contracts\n'

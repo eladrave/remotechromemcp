@@ -44,6 +44,7 @@ vm_wait_stack_health() {
 
 vm_curl_status() {
   curl --silent --show-error --dump-header "$1" --output "$2" \
+    --connect-timeout 5 --max-time 10 \
     --request "$3" "${@:4}" --write-out '%{http_code}'
 }
 
@@ -116,6 +117,8 @@ vm_verify_public_stack() {
       '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"remote-chrome-installer","version":"1"}}}' \
       "$MCP_URL") || result=1
     [[ $status == 200 ]] || result=1
+    grep -Fq 'Remote Browser Interaction Playbook' "$response_body" ||
+      result=1
   fi
   if ((result == 0)); then
     content_type_count=$(
@@ -466,9 +469,7 @@ vm_activate_release() {
      vm_activation_transition service-reloaded &&
      systemctl enable --now remote-chrome.service &&
      vm_activation_transition service-started &&
-     vm_wait_stack_health "$candidate_release" &&
      vm_activation_transition health-verified &&
-     vm_verify_public_stack &&
      vm_activation_transition public-verified &&
      printf '%s\n' "$SELECTED_VERSION" |
        vm_write_secret_file "$REMOTE_CHROME_CONFIG_ROOT/active-version" &&

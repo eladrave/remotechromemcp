@@ -225,6 +225,9 @@ vm_render_install_env() {
     printf 'BACKUP_SCHEDULE=%s\n' \
       "$(vm_single_quote_dotenv "${BACKUP_SCHEDULE:-}")"
     printf 'SELECTED_VERSION=%s\n' "$SELECTED_VERSION"
+    if [[ $SELECTED_VERSION == master ]]; then
+      printf 'RELEASE_VERIFICATION=unpinned\n'
+    fi
   } | vm_write_secret_file "$destination"
 }
 

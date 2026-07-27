@@ -1,24 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-install_root=${REMOTE_CHROME_INSTALL_ROOT:-/opt/remotechromemcp}
+if [[ -n ${REMOTE_CHROME_TEST_ROOT:-} ]]; then
+  install_root="$(realpath -m -- "$REMOTE_CHROME_TEST_ROOT")/opt/remotechromemcp"
+else
+  install_root=/opt/remotechromemcp
+fi
 current="$install_root/current"
 
-case "${1:-}" in
-  wait-ready)
-    # Task 4 installs the service's readiness target before activation. Task 5
-    # extends this fixed dispatch boundary with the remaining CLI subcommands.
-    # shellcheck source=lib/common.sh
-    source "$current/vminstall/lib/common.sh"
-    # shellcheck source=lib/config.sh
-    source "$current/vminstall/lib/config.sh"
-    # shellcheck source=lib/activate.sh
-    source "$current/vminstall/lib/activate.sh"
-    vm_init_paths
-    vm_wait_stack_health "$current"
-    ;;
-  *)
-    printf 'Usage: remote-chrome wait-ready\n' >&2
-    exit 2
-    ;;
-esac
+for library in common wizard config release activate management; do
+  library_path="$current/vminstall/lib/$library.sh"
+  [[ -f $library_path && ! -L $library_path ]] || {
+    printf 'ERROR: installed management library is unavailable: %s\n' \
+      "$library" >&2
+    exit 69
+  }
+  # shellcheck disable=SC1090
+  source "$library_path"
+done
+
+vm_init_paths
+vm_management_dispatch "${1:-}" "${@:2}"

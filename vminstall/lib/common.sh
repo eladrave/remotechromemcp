@@ -32,7 +32,11 @@ vm_run_mutation() {
 }
 
 vm_require_root() {
-  local effective_uid=${REMOTE_CHROME_TEST_EUID:-$EUID}
+  local effective_uid=$EUID
+  if [[ -n ${REMOTE_CHROME_TEST_ROOT:-} &&
+        -n ${REMOTE_CHROME_CANONICAL_TEST_ROOT:-} ]]; then
+    effective_uid=${REMOTE_CHROME_TEST_EUID:-$EUID}
+  fi
   [[ $effective_uid -eq 0 ]] ||
     vm_die 77 'Run the installer as root, for example with sudo sh'
 }
