@@ -1317,6 +1317,47 @@ for hanging_probe in SYSTEMCTL DOCKER CURL DU FIND; do
     fail "$hanging_probe probe must terminate within the CLI deadline"
 done
 
+# A Docker CLI plugin is a descendant rather than an exec replacement. Keep
+# the inherited output pipe open after the monitored parent is killed; the
+# inner deadline must terminate the whole process group before this outer
+# watchdog fires.
+forking_hang="$test_root/forking-descendant-hang"
+apply_patch_fake "$forking_hang" \
+  'trap "" TERM' \
+  '(' \
+  '  trap "" TERM' \
+  '  /bin/sleep 30' \
+  ') &' \
+  'wait'
+set +e
+SECONDS=0
+/usr/bin/timeout --kill-after=1 8s \
+  bash -c '
+    source vminstall/lib/activate.sh
+    output=$(vm_run_with_timeout 1 "$1")
+    status=$?
+    [[ $status -eq 75 && -z $output ]]
+  ' _ "$forking_hang" \
+  >"$test_root/forking-timeout.stdout" \
+  2>"$test_root/forking-timeout.stderr"
+forking_timeout_status=$?
+forking_timeout_elapsed=$SECONDS
+set -e
+[[ $forking_timeout_status -ne 124 &&
+   $forking_timeout_status -ne 137 &&
+   $forking_timeout_elapsed -lt 8 ]] ||
+  fail "forking descendant must terminate inside the management deadline: status=$forking_timeout_status elapsed=$forking_timeout_elapsed"
+
+for raw_timeout_status in 124 137; do
+  set +e
+  vm_run_with_timeout 1 \
+    bash -c "exit $raw_timeout_status"
+  normalized_timeout_status=$?
+  set -e
+  [[ $normalized_timeout_status -eq 75 ]] ||
+    fail "timeout status $raw_timeout_status must normalize to 75"
+done
+
 for invalid_health_bounds in \
   'REMOTE_CHROME_HEALTH_ATTEMPTS=0' \
   'REMOTE_CHROME_HEALTH_ATTEMPTS=999' \

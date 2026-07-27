@@ -31,7 +31,7 @@ vm_run_with_timeout() {
   shift
   vm_validate_integer_bound "$seconds" 1 600 || return 64
   local status=0
-  /usr/bin/timeout --foreground --kill-after=2 "${seconds}s" "$@" ||
+  /usr/bin/timeout --kill-after=2 "${seconds}s" "$@" ||
     status=$?
   [[ $status -ne 124 && $status -ne 137 ]] || return 75
   return "$status"
