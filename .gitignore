@@ -9,3 +9,4 @@ caddy-data/
 caddy-config/
 chrome-profile/
 dist/
+.release-staging/

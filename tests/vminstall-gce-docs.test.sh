@@ -74,6 +74,14 @@ require_regex "$packager" 'trap cleanup EXIT'
 require_regex "$packager" 'trap .*package_signal.* HUP'
 require_regex "$packager" 'trap .*package_signal.* INT'
 require_regex "$packager" 'trap .*package_signal.* TERM'
+require_literal .gitignore '.release-staging/'
+require_literal "$packager" '/usr/bin/flock -x "$publication_lock_fd"'
+require_literal "$packager" \
+  '/usr/bin/python3 -I -S - "$staged_dist" "$dist_dir"'
+require_regex "$packager" \
+  'unset PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONINSPECT PYTHONUSERBASE'
+assert_before "$packager" '/usr/bin/flock -x "$publication_lock_fd"' \
+  'status --porcelain'
 
 gce_headings=(
   'Prerequisites'
@@ -178,23 +186,31 @@ done
 
 package_tmp="$(mktemp -d)"
 trap 'rm -rf "$package_tmp"' EXIT
+
+init_package_repo() {
+  local destination=$1
+  shift
+  mkdir -p "$destination/scripts"
+  cp "$packager" "$destination/scripts/package-release.sh"
+  chmod +x "$destination/scripts/package-release.sh"
+  git -C "$destination" init -q
+  git -C "$destination" config user.name 'Release Contract'
+  git -C "$destination" config user.email release-contract@example.test
+  printf 'release payload\n' >"$destination/payload.txt"
+  printf 'dist/\n.release-staging/\n' >"$destination/.gitignore"
+  git -C "$destination" add scripts/package-release.sh payload.txt .gitignore
+  git -C "$destination" commit -qm 'release fixture'
+  local fixture_tag
+  for fixture_tag in "$@"; do
+    git -C "$destination" tag -a "$fixture_tag" -m "$fixture_tag"
+  done
+}
+
 package_repo="$package_tmp/repo"
-mkdir -p "$package_repo/scripts"
-cp "$packager" "$package_repo/scripts/package-release.sh"
-chmod +x "$package_repo/scripts/package-release.sh"
-grep -Fq 'mktemp -d "$repo_dir/' "$package_repo/scripts/package-release.sh" ||
-  fail 'release staging must be a same-filesystem sibling of dist inside the repository'
-grep -Fq '/usr/bin/python3 - "$staged_dist" "$dist_dir"' \
+init_package_repo "$package_repo" v1.0.0
+grep -Fq '/usr/bin/mktemp -d "$staging_root/' \
   "$package_repo/scripts/package-release.sh" ||
-  fail 'atomic publication must use the trusted system Python interpreter'
-git -C "$package_repo" init -q
-git -C "$package_repo" config user.name 'Release Contract'
-git -C "$package_repo" config user.email release-contract@example.test
-printf 'release payload\n' >"$package_repo/payload.txt"
-printf 'dist/\n' >"$package_repo/.gitignore"
-git -C "$package_repo" add scripts/package-release.sh payload.txt .gitignore
-git -C "$package_repo" commit -qm 'release fixture'
-git -C "$package_repo" tag -a v1.0.0 -m v1.0.0
+  fail 'release staging must be a same-filesystem sibling of dist inside the repository'
 
 "$package_repo/scripts/package-release.sh" v1.0.0 >"$package_tmp/output"
 archive="$package_repo/dist/remotechromemcp-v1.0.0.tar.gz"
@@ -273,6 +289,8 @@ fi
 cp "$package_tmp/original-archive" "$archive"
 cp "$package_tmp/original-checksum" "$checksum"
 
+crash_repo="$package_tmp/crash-repo"
+init_package_repo "$crash_repo" v1.0.0
 crash_bin="$package_tmp/crash-bin"
 mkdir "$crash_bin"
 cat >"$crash_bin/python3" <<'EOF'
@@ -281,63 +299,210 @@ set -euo pipefail
 /usr/bin/python3 "$@"
 if [[ ${FAKE_EXCHANGE_CRASH:-0} == 1 ]]; then
   printf 'exchange completed\n' >"$FAKE_EXCHANGE_MARKER"
-  kill -KILL "$PPID"
+  kill -KILL "$FAKE_PACKAGE_CRASH_PID"
   exit 137
 fi
 EOF
 chmod +x "$crash_bin/python3"
 sed -i \
-  's|/usr/bin/python3 - "$staged_dist" "$dist_dir"|'\
-"$crash_bin"'/python3 - "$staged_dist" "$dist_dir"|' \
-  "$package_repo/scripts/package-release.sh"
-git -C "$package_repo" add scripts/package-release.sh
-git -C "$package_repo" commit -qm 'inject controlled publication crash'
-git -C "$package_repo" tag -fa v1.0.0 -m v1.0.0
-rm "$archive" "$checksum"
-"$package_repo/scripts/package-release.sh" v1.0.0 >/dev/null
-crash_expected_hash=$(sha256sum "$archive" | cut -d' ' -f1)
-rm "$archive" "$checksum"
+  's|/usr/bin/python3 -I -S - "$staged_dist" "$dist_dir"|'\
+"$crash_bin"'/python3 -I -S - "$staged_dist" "$dist_dir"|' \
+  "$crash_repo/scripts/package-release.sh"
+sed -i '/^umask 077$/a export FAKE_PACKAGE_CRASH_PID=$BASHPID' \
+  "$crash_repo/scripts/package-release.sh"
+git -C "$crash_repo" add scripts/package-release.sh
+git -C "$crash_repo" commit -qm 'inject controlled publication crash'
+git -C "$crash_repo" tag -fa v1.0.0 -m v1.0.0 >/dev/null
+"$crash_repo/scripts/package-release.sh" v1.0.0 >/dev/null
+crash_archive="$crash_repo/dist/remotechromemcp-v1.0.0.tar.gz"
+crash_checksum="$crash_archive.sha256"
+crash_expected_hash=$(sha256sum "$crash_archive" | cut -d' ' -f1)
+rm "$crash_archive" "$crash_checksum"
 if FAKE_EXCHANGE_CRASH=1 \
   FAKE_EXCHANGE_MARKER="$package_tmp/exchange-marker" \
-  "$package_repo/scripts/package-release.sh" v1.0.0 >/dev/null 2>&1; then
+  "$crash_repo/scripts/package-release.sh" v1.0.0 >/dev/null 2>&1; then
   fail 'post-publication SIGKILL fixture unexpectedly reported success'
 fi
 [[ -f $package_tmp/exchange-marker ]] ||
   fail 'post-publication SIGKILL fixture did not reach the atomic exchange'
-[[ -f $archive && -f $checksum ]] ||
+[[ -f $crash_archive && -f $crash_checksum ]] ||
   fail 'post-publication SIGKILL left an incomplete first release pair'
-[[ $(sha256sum "$archive" | cut -d' ' -f1) == "$crash_expected_hash" ]] ||
+[[ $(sha256sum "$crash_archive" | cut -d' ' -f1) == "$crash_expected_hash" ]] ||
   fail 'post-publication SIGKILL changed first-publication archive bytes'
-(cd "$package_repo/dist" &&
-  sha256sum -c "$(basename "$checksum")") >/dev/null ||
+(cd "$crash_repo/dist" &&
+  sha256sum -c "$(basename "$crash_checksum")") >/dev/null ||
   fail 'post-publication SIGKILL left an invalid first release pair'
+if ! find "$crash_repo/.release-staging" -mindepth 1 -maxdepth 1 \
+  -type d -print -quit | grep -q .; then
+  fail 'post-publication SIGKILL fixture did not retain crash residue'
+fi
+if ! "$crash_repo/scripts/package-release.sh" v1.0.0 >/dev/null 2>&1; then
+  fail 'the first rerun after a post-exchange crash must recover automatically'
+fi
+[[ -d $crash_repo/.release-staging && ! -L $crash_repo/.release-staging ]] ||
+  fail 'release recovery must retain one bounded real staging namespace'
+if find "$crash_repo/.release-staging" -mindepth 1 -print -quit |
+   grep -q .; then
+  fail 'release recovery must reap validated crash residue'
+fi
+(cd "$crash_repo/dist" &&
+  sha256sum -c "$(basename "$crash_checksum")") >/dev/null ||
+  fail 'post-crash rerun damaged the published pair'
 
-printf 'dirty tracked\n' >>"$package_repo/payload.txt"
-if "$package_repo/scripts/package-release.sh" v1.0.0 >/dev/null 2>&1; then
+printf 'unexpected\n' >"$crash_repo/.release-staging/operator-file"
+if "$crash_repo/scripts/package-release.sh" v1.0.0 >/dev/null 2>&1; then
+  fail 'release recovery must reject unexpected staging namespace entries'
+fi
+[[ -f $crash_repo/.release-staging/operator-file ]] ||
+  fail 'release recovery must not delete an unvalidated staging entry'
+
+symlink_repo="$package_tmp/symlink-staging-repo"
+init_package_repo "$symlink_repo" v1.0.0
+symlink_escape="$package_tmp/symlink-staging-escape"
+mkdir "$symlink_escape"
+printf 'preserve\n' >"$symlink_escape/sentinel"
+ln -s "$symlink_escape" "$symlink_repo/.release-staging"
+if "$symlink_repo/scripts/package-release.sh" v1.0.0 >/dev/null 2>&1; then
+  fail 'release recovery must reject a symlinked staging namespace'
+fi
+[[ $(<"$symlink_escape/sentinel") == preserve ]] ||
+  fail 'staging namespace rejection must not mutate a symlink target'
+
+hostile_repo="$package_tmp/hostile-python-repo"
+init_package_repo "$hostile_repo"
+cat >"$hostile_repo/ctypes.py" <<'PY'
+import os
+open(os.environ["MALICIOUS_PYTHON_MARKER"], "a").write("cwd ctypes\n")
+raise RuntimeError("cwd ctypes loaded")
+PY
+cat >"$hostile_repo/sitecustomize.py" <<'PY'
+import os
+open(os.environ["MALICIOUS_PYTHON_MARKER"], "a").write("cwd sitecustomize\n")
+PY
+git -C "$hostile_repo" add ctypes.py sitecustomize.py
+git -C "$hostile_repo" commit -qm 'hostile cwd modules'
+git -C "$hostile_repo" tag -a v1.0.0 -m v1.0.0
+hostile_path="$package_tmp/hostile-pythonpath"
+mkdir "$hostile_path"
+cat >"$hostile_path/ctypes.py" <<'PY'
+import os
+open(os.environ["MALICIOUS_PYTHON_MARKER"], "a").write("path ctypes\n")
+raise RuntimeError("PYTHONPATH ctypes loaded")
+PY
+cat >"$hostile_path/sitecustomize.py" <<'PY'
+import os
+open(os.environ["MALICIOUS_PYTHON_MARKER"], "a").write("path sitecustomize\n")
+PY
+hostile_marker="$package_tmp/hostile-python-loaded"
+(
+  cd "$hostile_repo"
+  PYTHONPATH="$hostile_path" PYTHONSTARTUP="$hostile_path/sitecustomize.py" \
+    MALICIOUS_PYTHON_MARKER="$hostile_marker" \
+    ./scripts/package-release.sh v1.0.0 >/dev/null
+)
+[[ ! -e $hostile_marker ]] ||
+  fail 'isolated release publication loaded an attacker-controlled Python module'
+(cd "$hostile_repo/dist" &&
+  sha256sum -c remotechromemcp-v1.0.0.tar.gz.sha256) >/dev/null ||
+  fail 'isolated Python publication did not produce a valid release pair'
+
+noop_repo="$package_tmp/noop-python-repo"
+init_package_repo "$noop_repo" v1.0.0
+noop_python="$package_tmp/noop-python"
+cat >"$noop_python" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$noop_python"
+sed -i \
+  's|/usr/bin/python3 -I -S - "$staged_dist" "$dist_dir"|'\
+"$noop_python"' -I -S - "$staged_dist" "$dist_dir"|' \
+  "$noop_repo/scripts/package-release.sh"
+git -C "$noop_repo" add scripts/package-release.sh
+git -C "$noop_repo" commit -qm 'inject no-op exchange interpreter'
+git -C "$noop_repo" tag -fa v1.0.0 -m v1.0.0 >/dev/null
+if "$noop_repo/scripts/package-release.sh" v1.0.0 \
+  >"$package_tmp/noop-output" 2>/dev/null; then
+  fail 'packager reported success when the atomic exchange did not occur'
+fi
+[[ ! -e $noop_repo/dist/remotechromemcp-v1.0.0.tar.gz ]] ||
+  fail 'no-op exchange fixture unexpectedly published an archive'
+[[ ! -s $package_tmp/noop-output ]] ||
+  fail 'failed post-exchange verification must not print success paths'
+
+dirty_tracked_repo="$package_tmp/dirty-tracked-repo"
+init_package_repo "$dirty_tracked_repo" v1.0.0
+printf 'dirty tracked\n' >>"$dirty_tracked_repo/payload.txt"
+if "$dirty_tracked_repo/scripts/package-release.sh" v1.0.0 >/dev/null 2>&1; then
   fail 'packager accepted a dirty tracked file'
 fi
-git -C "$package_repo" checkout -q -- payload.txt
-printf 'dirty untracked\n' >"$package_repo/untracked.txt"
-if "$package_repo/scripts/package-release.sh" v1.0.0 >/dev/null 2>&1; then
+
+dirty_untracked_repo="$package_tmp/dirty-untracked-repo"
+init_package_repo "$dirty_untracked_repo" v1.0.0
+printf 'dirty untracked\n' >"$dirty_untracked_repo/untracked.txt"
+if "$dirty_untracked_repo/scripts/package-release.sh" v1.0.0 >/dev/null 2>&1; then
   fail 'packager accepted an untracked file'
 fi
-rm "$package_repo/untracked.txt"
 
-git -C "$package_repo" tag -d v1.0.0 >/dev/null
-if "$package_repo/scripts/package-release.sh" v1.0.0 >/dev/null 2>&1; then
+missing_tag_repo="$package_tmp/missing-tag-repo"
+init_package_repo "$missing_tag_repo"
+if "$missing_tag_repo/scripts/package-release.sh" v1.0.0 \
+  >"$package_tmp/missing-tag-output" 2>"$package_tmp/missing-tag-error"; then
   fail 'packager accepted a missing release tag'
 fi
-[[ $(sha256sum "$archive" | cut -d' ' -f1) == "$crash_expected_hash" ]] ||
-  fail 'failed packaging damaged the prior archive'
-(cd "$package_repo/dist" && sha256sum -c "$(basename "$checksum")") >/dev/null ||
-  fail 'failed packaging damaged the prior checksum pair'
+grep -Fq 'Release tag does not exist' "$package_tmp/missing-tag-error" ||
+  fail 'missing-tag fixture failed before reaching tag validation'
 
-git -C "$package_repo" tag -a v1.0.0 -m v1.0.0
-printf 'later commit\n' >>"$package_repo/payload.txt"
-git -C "$package_repo" add payload.txt
-git -C "$package_repo" commit -qm 'commit after tag'
-if "$package_repo/scripts/package-release.sh" v1.0.0 >/dev/null 2>&1; then
+mismatch_repo="$package_tmp/tag-mismatch-repo"
+init_package_repo "$mismatch_repo" v1.0.0
+printf 'later commit\n' >>"$mismatch_repo/payload.txt"
+git -C "$mismatch_repo" add payload.txt
+git -C "$mismatch_repo" commit -qm 'commit after tag'
+if "$mismatch_repo/scripts/package-release.sh" v1.0.0 \
+  >"$package_tmp/mismatch-output" 2>"$package_tmp/mismatch-error"; then
   fail 'packager accepted a tag that does not bind the current commit'
 fi
+grep -Fq 'does not bind the current commit' "$package_tmp/mismatch-error" ||
+  fail 'tag-mismatch fixture failed before reaching commit validation'
+
+concurrent_repo="$package_tmp/concurrent-repo"
+init_package_repo "$concurrent_repo" v2.0.0 v3.0.0
+concurrent_gate="$package_tmp/concurrent-gate"
+mkdir "$concurrent_gate"
+concurrent_wrapper="$package_tmp/concurrent-wrapper"
+cat >"$concurrent_wrapper" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+version=\$1
+touch "$concurrent_gate/ready.\$version"
+while [[ ! -e "$concurrent_gate/go" ]]; do /bin/sleep 0.01; done
+exec "$concurrent_repo/scripts/package-release.sh" "\$version"
+EOF
+chmod +x "$concurrent_wrapper"
+for concurrent_version in v2.0.0 v3.0.0; do
+  (
+    set +e
+    "$concurrent_wrapper" "$concurrent_version" \
+      >"$package_tmp/$concurrent_version.out" \
+      2>"$package_tmp/$concurrent_version.err"
+    printf '%s\n' "$?" >"$package_tmp/$concurrent_version.status"
+  ) &
+done
+for _ in {1..500}; do
+  [[ $(find "$concurrent_gate" -name 'ready.*' | wc -l) -eq 2 ]] && break
+  /bin/sleep 0.01
+done
+[[ $(find "$concurrent_gate" -name 'ready.*' | wc -l) -eq 2 ]] ||
+  fail 'concurrent release workers did not reach the deterministic barrier'
+touch "$concurrent_gate/go"
+wait
+for concurrent_version in v2.0.0 v3.0.0; do
+  [[ $(<"$package_tmp/$concurrent_version.status") == 0 ]] ||
+    fail "serialized publication failed for $concurrent_version"
+  concurrent_checksum="remotechromemcp-$concurrent_version.tar.gz.sha256"
+  (cd "$concurrent_repo/dist" &&
+    sha256sum -c "$concurrent_checksum") >/dev/null ||
+    fail "concurrent publication lost or damaged $concurrent_version"
+done
 
 printf 'PASS: guided VM, GCE, release, and safety contracts\n'
