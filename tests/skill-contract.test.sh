@@ -128,6 +128,13 @@ validate_skill() {
     'An authenticated tab already exists' \
     'reuse.*(authenticated|persistent|profile|state)' || return 1
   require_row_decision "$candidate" \
+    'An MCP client disconnects after login' \
+    'reconnect.*persistent browser.*never clear or replace.*website state' ||
+    return 1
+  require_row_decision "$candidate" \
+    'A site expires its own session' \
+    'new `/login/` handoff.*do not erase.*profile' || return 1
+  require_row_decision "$candidate" \
     'A guessed `/ap/signin` route fails' \
     'homepage.*visible.*(login|Account & Lists)' || return 1
   require_row_decision "$candidate" \

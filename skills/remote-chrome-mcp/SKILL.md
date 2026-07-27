@@ -73,6 +73,13 @@ and password in a password manager. Do not relay those values through chat.
    using element references.
 5. Use each element reference only with the MCP session and relevant snapshot
    that produced it.
+6. Keep website authentication in the shared persistent profile. MCP transport
+   sessions may end, but do not clear cookies, local storage, history, or the
+   profile, and do not create an incognito or temporary replacement unless the
+   user explicitly requests removal of that state.
+7. After a human completes login or MFA, take a fresh snapshot, verify the
+   authenticated page, and leave the profile intact so later agents can reuse
+   it. A website may still expire or revoke its own session.
 
 If navigation times out, do not declare failure and do not retry immediately.
 Take a fresh snapshot first: the page may have loaded despite the tool timeout.
@@ -121,6 +128,8 @@ data as account changes.
 |---|---|
 | Navigation times out | Take a fresh snapshot before any retry. |
 | An authenticated tab already exists | Reuse it and its persistent profile state. |
+| An MCP client disconnects after login | Reconnect to the same persistent browser; never clear or replace its website state. |
+| A site expires its own session | Request a new `/login/` handoff; do not erase the rest of the profile. |
 | A guessed `/ap/signin` route fails | Open Amazon's homepage and use the visible `Account & Lists` login control. |
 | MFA, CAPTCHA, or a security key appears | Stop and request human control at `/login/`. |
 | The user has no shell | Give the `/login/` URL; never instruct them to run `login.sh` remotely. |

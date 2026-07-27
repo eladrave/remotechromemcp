@@ -23,6 +23,32 @@ Close the browser tab containing noVNC when the handoff is complete. Closing
 that tab does not stop remote Chrome, Playwright MCP, or the signed-in website
 session.
 
+## Authentication persistence
+
+MCP connections and snapshot element references are temporary, but website
+authentication belongs to Chrome's persistent profile. After login and any
+required MFA are complete, cookies, local storage, and other site state survive
+closing the noVNC tab, disconnecting an MCP client, restarting the container,
+and rebooting the host.
+
+The Docker Compose deployment stores that profile in the `chrome-profile`
+volume. The VM installer bind-mounts it from the configured persistent data
+directory and includes it in profile backups. Keep the same Compose project
+name and never run `docker compose down --volumes` unless you intentionally
+want to delete browser state.
+
+Container Chrome uses its built-in basic password-store backend because the
+container has no durable GNOME or KDE desktop keyring. This makes encrypted
+site state readable after container replacement, but it also means the profile
+volume must be protected as sensitive data. The browser service has an extended
+graceful-stop window so Chrome can finish writing profile state during planned
+maintenance.
+
+No server can force a third-party website to keep a login valid forever. Sites
+may expire cookies, revoke sessions, or require periodic verification. When
+that happens, complete the new verification through `/login/`; do not create a
+replacement browser profile.
+
 ## Open the console from an SSH-only session
 
 Run `./login.sh` on the server and copy the displayed HTTPS URL to a browser on

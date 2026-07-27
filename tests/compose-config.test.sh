@@ -137,6 +137,7 @@ assert(!/^\s{4}ports:/m.test(browser), 'browser must not publish ports');
 assert.match(browser, /^\s{4}expose:\n(?:\s{6}.+\n)*\s{6}- "?(6080|8931)"?/m);
 assert.match(browser, /^\s{4}init: true$/m);
 assert.match(browser, /^\s{4}restart: unless-stopped$/m);
+assert.match(browser, /^\s{4}stop_grace_period: 45s$/m);
 assert.match(browser, /^\s{4}shm_size:/m);
 assert.match(browser, /chrome-profile:\/data\/chrome-profile/);
 assert.match(proxy, /\$\{PROXY_BIND_ADDRESS:-0\.0\.0\.0\}:\$\{PROXY_HTTP_PORT:-80\}:80/);
@@ -176,6 +177,8 @@ assert_contains docker/Dockerfile '^USER remote-chrome$' \
 
 assert_contains docker/supervisord.conf '--remote-debugging-address=127\.0\.0\.1' \
   'Chrome CDP must bind to container loopback'
+assert_contains docker/supervisord.conf '--password-store=basic' \
+  'container Chrome must use a restart-stable password store'
 assert_contains docker/supervisord.conf '--host 0\.0\.0\.0' \
   'Playwright MCP must bind to the private container interface'
 assert_contains docker/supervisord.conf '--port 8931' \

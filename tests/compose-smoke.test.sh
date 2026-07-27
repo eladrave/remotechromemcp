@@ -153,12 +153,81 @@ wait_for_healthy proxy
 "${compose[@]}" exec -T browser \
   sh -c "printf '%s\n' compose-smoke >'/data/chrome-profile/$sentinel'"
 
+"${compose[@]}" exec -T \
+  --env NODE_PATH=/usr/local/lib/node_modules/@playwright/mcp/node_modules \
+  browser node <<'NODE'
+const http = require('node:http');
+const { chromium } = require('playwright-core');
+
+(async () => {
+  const server = http.createServer((request, response) => {
+    response.writeHead(200, { 'Content-Type': 'text/html' });
+    response.end('<!doctype html><title>Profile persistence probe</title>');
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(18080, '127.0.0.1', resolve);
+  });
+  const browser = await chromium.connectOverCDP('http://127.0.0.1:9222');
+  const [context] = browser.contexts();
+  if (!context) throw new Error('persistent Chrome context is missing');
+  const page = await context.newPage();
+  await page.goto('http://127.0.0.1:18080/');
+  await page.evaluate(() => {
+    document.cookie =
+      'remote_chrome_persistence_probe=survives-recreation; ' +
+      'Max-Age=3600; Path=/; SameSite=Lax';
+  });
+  const cookies = await context.cookies('http://127.0.0.1:18080/');
+  const probe = cookies.find(
+    cookie => cookie.name === 'remote_chrome_persistence_probe',
+  );
+  if (!probe || probe.value !== 'survives-recreation') {
+    throw new Error('persistent Chrome cookie was not created');
+  }
+  await page.close();
+  server.closeAllConnections();
+  await new Promise(resolve => server.close(resolve));
+  // Chrome's network service commits durable cookies asynchronously. The
+  // production container stays running, so allow that normal commit window
+  // before simulating a later restart.
+  await new Promise(resolve => setTimeout(resolve, 35000));
+  process.exit(0);
+})().catch(error => {
+  console.error(error);
+  process.exit(1);
+});
+NODE
+
 "${compose[@]}" up -d --force-recreate --no-deps browser
 wait_for_healthy browser
 wait_for_healthy proxy
 
 "${compose[@]}" exec -T browser \
   grep -qx compose-smoke "/data/chrome-profile/$sentinel"
+
+"${compose[@]}" exec -T \
+  --env NODE_PATH=/usr/local/lib/node_modules/@playwright/mcp/node_modules \
+  browser node <<'NODE'
+const { chromium } = require('playwright-core');
+
+(async () => {
+  const browser = await chromium.connectOverCDP('http://127.0.0.1:9222');
+  const [context] = browser.contexts();
+  if (!context) throw new Error('persistent Chrome context is missing');
+  const cookies = await context.cookies('http://127.0.0.1:18080/');
+  const probe = cookies.find(
+    cookie => cookie.name === 'remote_chrome_persistence_probe',
+  );
+  if (!probe || probe.value !== 'survives-recreation') {
+    throw new Error('persistent Chrome cookie did not survive recreation');
+  }
+  process.exit(0);
+})().catch(error => {
+  console.error(error);
+  process.exit(1);
+});
+NODE
 
 curl_https=(
   curl

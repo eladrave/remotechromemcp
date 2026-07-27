@@ -9,6 +9,7 @@ services:
       SCREEN_GEOMETRY: ${SCREEN_GEOMETRY:-1440x900x24}
     init: true
     restart: unless-stopped
+    stop_grace_period: 45s
     shm_size: "2gb"
     volumes:
       - chrome-profile:/data/chrome-profile

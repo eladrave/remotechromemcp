@@ -12,6 +12,7 @@ required_concepts=(
   'purchase'
   'Account & Lists'
   'server instructions'
+  'Never clear cookies'
 )
 
 for concept in "${required_concepts[@]}"; do

@@ -13,6 +13,16 @@ remote browser is deployed.
   context. Avoid creating duplicate tabs.
 - Treat the browser profile as persistent. Existing authentication may still
   be valid, so inspect the visible page before asking the user to sign in.
+- Treat MCP transport sessions and element references as temporary, but treat
+  website cookies, local storage, and authenticated state as durable browser
+  profile data. Ending an MCP session must not trigger a website logout.
+- Never clear cookies, site data, browser history, or the persistent profile,
+  and never replace it with an incognito or temporary context, unless the user
+  explicitly asks for that data to be removed.
+- After a human completes login or MFA through `/login/`, take a fresh
+  snapshot, verify the authenticated page, and leave that profile state in
+  place for future agents. If a site later expires or revokes its own session,
+  request a new human handoff instead of claiming persistence failed.
 - Assume the remote browser host has no shell available to you. Use the MCP
   browser tools and visible page controls; do not rely on terminal commands,
   local scripts, or direct filesystem access.
