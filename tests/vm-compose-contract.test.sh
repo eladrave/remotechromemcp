@@ -9,7 +9,7 @@ fail() {
   exit 1
 }
 
-for file in vminstall/compose.vm.yaml compose.yaml Caddyfile; do
+for file in vminstall/compose.vm.yaml compose.yaml Caddyfile docker/Dockerfile; do
   [[ -f "$file" ]] || fail "required file missing: $file"
 done
 
@@ -23,6 +23,10 @@ grep -Fq '/data' vminstall/compose.vm.yaml ||
   fail 'VM override must replace Caddy data storage'
 grep -Fq '/config' vminstall/compose.vm.yaml ||
   fail 'VM override must replace Caddy config storage'
+grep -Fq 'groupadd --gid 10001 remote-chrome' docker/Dockerfile ||
+  fail 'browser image must create the fixed remote-chrome GID 10001'
+grep -Fq 'useradd --uid 10001 --gid remote-chrome' docker/Dockerfile ||
+  fail 'browser image must create the fixed remote-chrome UID 10001'
 
 if command -v docker >/dev/null 2>&1 &&
    docker compose version >/dev/null 2>&1; then
@@ -60,6 +64,26 @@ const proxy = services.proxy;
 
 assert(browser, 'rendered VM Compose config must contain the browser service');
 assert(proxy, 'rendered VM Compose config must contain the proxy service');
+assert.equal(
+  browser.user,
+  '10001:10001',
+  'browser runtime identity must match fresh bind-directory ownership'
+);
+assert.equal(
+  proxy.user,
+  '10001:10001',
+  'proxy runtime identity must match fresh Caddy bind-directory ownership'
+);
+assert.deepEqual(
+  [...(proxy.cap_drop || [])].sort(),
+  ['ALL'],
+  'non-root proxy must drop all ambient capabilities'
+);
+assert.deepEqual(
+  [...(proxy.cap_add || [])].sort(),
+  ['NET_BIND_SERVICE'],
+  'non-root proxy must regain only low-port bind capability'
+);
 
 function assertMount(service, target, source, readOnly = false) {
   const matches = (service.volumes || []).filter(volume => volume.target === target);

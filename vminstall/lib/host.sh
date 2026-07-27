@@ -110,3 +110,211 @@ vm_check_public_ports() {
   done <<<"$listeners"
   ((conflict == 0))
 }
+
+vm_atomic_install_file() {
+  local source=$1 destination=$2 mode=$3 pending
+  pending="${destination}.pending.$$"
+  vm_require_confined_destination "$pending" || return 1
+  vm_require_confined_destination "$destination" || return 1
+  if ! vm_run_mutation install -m "$mode" "$source" "$pending"; then
+    rm -f -- "$pending"
+    return 1
+  fi
+  if [[ ${REMOTE_CHROME_DRY_RUN:-0} == 1 ]]; then
+    cp -- "$source" "$pending" || return 1
+  fi
+  if ! vm_run_mutation mv -f -- "$pending" "$destination"; then
+    rm -f -- "$pending"
+    return 1
+  fi
+  if [[ ${REMOTE_CHROME_DRY_RUN:-0} == 1 ]]; then
+    cp -- "$pending" "$destination" || return 1
+    rm -f -- "$pending"
+  fi
+}
+
+vm_print_gcloud_guidance() {
+  cat >&2 <<'EOF'
+Install the official Google Cloud CLI, then rerun the installer:
+  key_tmp=$(mktemp)
+  repo_tmp=$(mktemp)
+  trap 'rm -f "$key_tmp" "$key_tmp.gpg" "$repo_tmp"' EXIT
+  curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg -o "$key_tmp"
+  gpg --batch --yes --dearmor -o "$key_tmp.gpg" "$key_tmp"
+  sudo install -m 0644 "$key_tmp.gpg" /usr/share/keyrings/cloud.google.gpg
+  printf '%s\n' 'deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main' >"$repo_tmp"
+  sudo install -m 0644 "$repo_tmp" /etc/apt/sources.list.d/google-cloud-sdk.list
+  sudo apt-get update
+  sudo apt-get install -y google-cloud-cli
+The VM uses its attached service-account metadata credentials; do not run gcloud init.
+EOF
+}
+
+vm_restore_gcloud_apt_state() {
+  local stage=$1 keyring=$2 source_file=$3
+  local key_present=$4 source_present=$5 key_mode=$6 source_mode=$7
+  local status=0
+  if [[ $key_present -eq 1 ]]; then
+    vm_atomic_install_file "$stage/prior-keyring" "$keyring" "$key_mode" ||
+      status=1
+  else
+    rm -f -- "$keyring" || status=1
+  fi
+  if [[ $source_present -eq 1 ]]; then
+    vm_atomic_install_file \
+      "$stage/prior-source" "$source_file" "$source_mode" || status=1
+  else
+    rm -f -- "$source_file" || status=1
+  fi
+  return "$status"
+}
+
+vm_abort_gcloud_provisioning() {
+  local stage=$1 keyring=$2 source_file=$3
+  local key_present=$4 source_present=$5 key_mode=$6 source_mode=$7
+  if vm_restore_gcloud_apt_state \
+    "$stage" "$keyring" "$source_file" \
+    "$key_present" "$source_present" "$key_mode" "$source_mode"; then
+    rm -rf -- "$stage"
+    return 1
+  fi
+  printf '%s\n' \
+    'ERROR: Google Cloud CLI apt rollback could not be confirmed; recovery retained:' \
+    "  keyring: $keyring" \
+    "  repository: $source_file" \
+    "  staging: $stage" >&2
+  return 70
+}
+
+vm_ensure_gcloud() {
+  [[ -n ${GCS_BUCKET:-} ]] || return 0
+  vm_require_root
+
+  local command keyring_dir keyring source_dir source_file binary_dir
+  local stage_dir source_line key_present=0 source_present=0
+  local key_mode=0644 source_mode=0644
+  command=$(vm_gcloud_path)
+  if [[ -e $command || -L $command ]]; then
+    vm_trusted_gcloud >/dev/null
+    return
+  fi
+
+  if [[ -n ${REMOTE_CHROME_CANONICAL_TEST_ROOT:-} ]]; then
+    keyring_dir="$REMOTE_CHROME_CANONICAL_TEST_ROOT/usr/share/keyrings"
+    source_dir="$REMOTE_CHROME_CANONICAL_TEST_ROOT/etc/apt/sources.list.d"
+    binary_dir="$REMOTE_CHROME_CANONICAL_TEST_ROOT/usr/bin"
+  else
+    keyring_dir=/usr/share/keyrings
+    source_dir=/etc/apt/sources.list.d
+    binary_dir=/usr/bin
+  fi
+  keyring="$keyring_dir/cloud.google.gpg"
+  source_file="$source_dir/google-cloud-sdk.list"
+  for destination in "$keyring_dir" "$source_dir" "$binary_dir"; do
+    vm_require_confined_destination "$destination" || return 1
+    [[ ! -L $destination ]] || return 1
+    install -d -m 0755 "$destination" || return 1
+    vm_require_confined_destination "$destination" || return 1
+  done
+  for destination in "$keyring" "$source_file"; do
+    [[ ! -L $destination ]] || return 1
+    vm_require_confined_destination "$destination" || return 1
+  done
+
+  stage_dir=$(mktemp -d) || return 1
+  if [[ -e $keyring ]]; then
+    [[ -f $keyring && ! -L $keyring ]] || {
+      rm -rf -- "$stage_dir"
+      return 1
+    }
+    key_present=1
+    key_mode=$(stat -c '%a' -- "$keyring") || {
+      rm -rf -- "$stage_dir"
+      return 1
+    }
+    cp -p -- "$keyring" "$stage_dir/prior-keyring" || {
+      rm -rf -- "$stage_dir"
+      return 1
+    }
+  fi
+  if [[ -e $source_file ]]; then
+    [[ -f $source_file && ! -L $source_file ]] || {
+      rm -rf -- "$stage_dir"
+      return 1
+    }
+    source_present=1
+    source_mode=$(stat -c '%a' -- "$source_file") || {
+      rm -rf -- "$stage_dir"
+      return 1
+    }
+    cp -p -- "$source_file" "$stage_dir/prior-source" || {
+      rm -rf -- "$stage_dir"
+      return 1
+    }
+  fi
+  vm_run_mutation apt-get update || {
+    vm_abort_gcloud_provisioning "$stage_dir" "$keyring" "$source_file" \
+      "$key_present" "$source_present" "$key_mode" "$source_mode"
+    return $?
+  }
+  vm_run_mutation apt-get install -y ca-certificates curl gnupg || {
+    vm_abort_gcloud_provisioning "$stage_dir" "$keyring" "$source_file" \
+      "$key_present" "$source_present" "$key_mode" "$source_mode"
+    return $?
+  }
+  vm_run_mutation curl -fsSL --max-time 30 \
+    https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+    -o "$stage_dir/apt-key.gpg" || {
+    vm_abort_gcloud_provisioning "$stage_dir" "$keyring" "$source_file" \
+      "$key_present" "$source_present" "$key_mode" "$source_mode"
+    return $?
+  }
+  if [[ ${REMOTE_CHROME_DRY_RUN:-0} == 1 ]]; then
+    : >"$stage_dir/apt-key.gpg"
+  fi
+  vm_run_mutation gpg --dearmor --output "$stage_dir/cloud.google.gpg" \
+    "$stage_dir/apt-key.gpg" || {
+    vm_abort_gcloud_provisioning "$stage_dir" "$keyring" "$source_file" \
+      "$key_present" "$source_present" "$key_mode" "$source_mode"
+    return $?
+  }
+  if [[ ${REMOTE_CHROME_DRY_RUN:-0} == 1 ]]; then
+    : >"$stage_dir/cloud.google.gpg"
+  fi
+  vm_atomic_install_file "$stage_dir/cloud.google.gpg" "$keyring" 0644 || {
+    vm_abort_gcloud_provisioning "$stage_dir" "$keyring" "$source_file" \
+      "$key_present" "$source_present" "$key_mode" "$source_mode"
+    return $?
+  }
+
+  source_line="deb [signed-by=$keyring] https://packages.cloud.google.com/apt cloud-sdk main"
+  printf '%s\n' "$source_line" >"$stage_dir/google-cloud-sdk.list"
+  vm_atomic_install_file \
+    "$stage_dir/google-cloud-sdk.list" "$source_file" 0644 || {
+    vm_abort_gcloud_provisioning "$stage_dir" "$keyring" "$source_file" \
+      "$key_present" "$source_present" "$key_mode" "$source_mode"
+    return $?
+  }
+
+  vm_run_mutation apt-get update || {
+    vm_abort_gcloud_provisioning "$stage_dir" "$keyring" "$source_file" \
+      "$key_present" "$source_present" "$key_mode" "$source_mode"
+    return $?
+  }
+  vm_run_mutation apt-get install -y google-cloud-cli || {
+    vm_abort_gcloud_provisioning "$stage_dir" "$keyring" "$source_file" \
+      "$key_present" "$source_present" "$key_mode" "$source_mode"
+    return $?
+  }
+  if [[ ${REMOTE_CHROME_DRY_RUN:-0} == 1 ]]; then
+    vm_require_confined_destination "$command" || return 1
+    printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$command" || return 1
+    chmod 0755 "$command" || return 1
+  fi
+  if ! vm_trusted_gcloud >/dev/null; then
+    vm_abort_gcloud_provisioning "$stage_dir" "$keyring" "$source_file" \
+      "$key_present" "$source_present" "$key_mode" "$source_mode"
+    return $?
+  fi
+  rm -rf -- "$stage_dir"
+}

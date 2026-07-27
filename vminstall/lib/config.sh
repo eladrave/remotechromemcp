@@ -261,18 +261,85 @@ vm_render_install_env() {
   } | vm_write_secret_file "$destination"
 }
 
-vm_preserve_installed_configuration() {
+vm_merge_installed_configuration() {
   local installed="$REMOTE_CHROME_CONFIG_ROOT/install.env"
-  [[ -f $installed && ! -L $installed ]] || return 0
-  DOMAIN=$(vm_read_env_value "$installed" DOMAIN) || return 1
-  ACME_EMAIL=$(vm_read_env_value "$installed" ACME_EMAIL) || return 1
-  REMOTE_CHROME_DATA_DIR=$(
+  local installed_domain installed_email installed_data_dir
+  local installed_bucket installed_schedule
+  if [[ -e $installed || -L $installed ]]; then
+    [[ -f $installed && ! -L $installed ]] || return 1
+  else
+    return 0
+  fi
+  installed_domain=$(vm_read_env_value "$installed" DOMAIN) || return 1
+  installed_email=$(vm_read_env_value "$installed" ACME_EMAIL) || return 1
+  installed_data_dir=$(
     vm_read_env_value "$installed" REMOTE_CHROME_DATA_DIR
   ) || return 1
-  GCS_BUCKET=$(vm_read_env_value "$installed" GCS_BUCKET) || return 1
-  BACKUP_SCHEDULE=$(
+  installed_bucket=$(vm_read_env_value "$installed" GCS_BUCKET) || return 1
+  installed_schedule=$(
     vm_read_env_value "$installed" BACKUP_SCHEDULE
   ) || return 1
+
+  vm_validate_domain "$installed_domain" || return 1
+  vm_validate_email "$installed_email" || return 1
+  vm_validate_data_dir "$installed_data_dir" || return 1
+  [[ -z $installed_bucket ]] ||
+    vm_validate_gcs_bucket "$installed_bucket" || return 1
+  vm_validate_config_value "$installed_schedule" || return 1
+
+  INSTALLATION_EXISTS=1
+  [[ ${DOMAIN_SET:-0} -eq 1 ]] || DOMAIN=$installed_domain
+  [[ ${EMAIL_SET:-0} -eq 1 ]] || ACME_EMAIL=$installed_email
+  [[ ${DATA_DIR_SET:-0} -eq 1 ]] ||
+    REMOTE_CHROME_DATA_DIR=$installed_data_dir
+  if [[ ${DISABLE_GCS_BACKUP:-0} -eq 1 ]]; then
+    GCS_BUCKET=
+    BACKUP_SCHEDULE=
+  else
+    [[ ${GCS_BUCKET_SET:-0} -eq 1 ]] || GCS_BUCKET=$installed_bucket
+    if [[ ${DISABLE_BACKUP_SCHEDULE:-0} -eq 1 ]]; then
+      BACKUP_SCHEDULE=
+    else
+      [[ ${BACKUP_SCHEDULE_SET:-0} -eq 1 ]] ||
+        BACKUP_SCHEDULE=$installed_schedule
+    fi
+  fi
+}
+
+vm_load_installed_configuration() {
+  vm_merge_installed_configuration
+}
+
+vm_create_runtime_directory() {
+  local destination=$1 owner=${2:-}
+  vm_require_management_destination "$destination" || return 1
+  if [[ -e $destination || -L $destination ]]; then
+    [[ -d $destination && ! -L $destination ]] || return 1
+    return 0
+  fi
+  install -d -m 0700 "$destination" || return 1
+  vm_require_management_destination "$destination" || return 1
+  if [[ -n $owner ]]; then
+    chown "$owner" "$destination" || return 1
+  fi
+}
+
+vm_create_data_root() {
+  local destination=$1 current_uid
+  vm_require_management_destination "$destination" || return 1
+  if [[ -e $destination || -L $destination ]]; then
+    [[ -d $destination && ! -L $destination ]] || return 1
+    current_uid=$(stat -c '%u' -- "$destination") || return 1
+    if [[ -z ${REMOTE_CHROME_TEST_ROOT:-} ]]; then
+      [[ $current_uid == 0 ]] || return 1
+    fi
+    chmod 0710 "$destination" || return 1
+    chown root:10001 "$destination" || return 1
+    return 0
+  fi
+  install -d -m 0710 "$destination" || return 1
+  vm_require_management_destination "$destination" || return 1
+  chown root:10001 "$destination" || return 1
 }
 
 vm_prepare_config() {
@@ -283,7 +350,7 @@ vm_prepare_config() {
     vm_validate_config_value "$supplied" || return 1
   done
   vm_validate_release_ref "${SELECTED_VERSION:-}" || return 1
-  vm_preserve_installed_configuration || return 1
+  vm_merge_installed_configuration || return 1
   vm_validate_domain "$DOMAIN" || return 1
   vm_validate_email "$ACME_EMAIL" || return 1
 
@@ -299,13 +366,15 @@ vm_prepare_config() {
   fi
 
   install -d -m 0700 "$REMOTE_CHROME_CONFIG_ROOT" || return 1
-  local subdirectory
+  vm_create_data_root "$REMOTE_CHROME_DATA_DIR" || return 1
+  local subdirectory owner
   for subdirectory in profile caddy-data caddy-config backups restore-staging; do
-    vm_require_management_destination \
-      "$REMOTE_CHROME_DATA_DIR/$subdirectory" || return 1
-    install -d -m 0700 "$REMOTE_CHROME_DATA_DIR/$subdirectory" || return 1
-    vm_require_management_destination \
-      "$REMOTE_CHROME_DATA_DIR/$subdirectory" || return 1
+    owner=
+    case "$subdirectory" in
+      profile|caddy-data|caddy-config) owner=10001:10001 ;;
+    esac
+    vm_create_runtime_directory \
+      "$REMOTE_CHROME_DATA_DIR/$subdirectory" "$owner" || return 1
   done
 
   vm_generate_credentials || return 1

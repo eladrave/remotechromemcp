@@ -40,6 +40,7 @@ const config = {
   services: {
     browser: {
       expose: ['6080', '8931'],
+      user: '10001:10001',
       volumes: [
         {
           type: 'bind',
@@ -49,6 +50,9 @@ const config = {
       ],
     },
     proxy: {
+      user: '10001:10001',
+      cap_drop: ['ALL'],
+      cap_add: ['NET_BIND_SERVICE'],
       environment: {
         ACME_EMAIL: process.env.EMAIL,
       },

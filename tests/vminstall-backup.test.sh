@@ -12,6 +12,7 @@ fail() {
 required_tests=(
   backup_stops_browser_before_tar
   backup_uploads_archive_checksum_manifest
+  backup_accepts_only_official_gcloud_package_symlink
   backup_upload_failure_restarts_stack
   backup_partial_stop_failure_restarts_browser
   backup_health_failure_returns_nonzero
@@ -468,6 +469,27 @@ backup_uploads_archive_checksum_manifest() {
     fail 'manifest must upload last as the commit marker'
   ! /usr/bin/tar -tzf "${uploads[2]}" | grep -Eq 'credentials|compose\\.env' ||
     fail 'backup archive must not contain configuration or credentials'
+}
+
+backup_accepts_only_official_gcloud_package_symlink() {
+  setup_fixture "$FUNCNAME"
+  mkdir -p "$fixture_root/usr/lib/google-cloud-sdk/bin"
+  mv "$fixture_root/usr/bin/gcloud" \
+    "$fixture_root/usr/lib/google-cloud-sdk/bin/gcloud"
+  ln -s ../lib/google-cloud-sdk/bin/gcloud "$fixture_root/usr/bin/gcloud"
+  vm_backup_profile gs://fixture-backups/remote-chrome ||
+    fail 'backup must accept the official fixed google-cloud-sdk package symlink'
+
+  setup_fixture "$FUNCNAME-poisoned"
+  mkdir -p "$fixture_root/tmp"
+  mv "$fixture_root/usr/bin/gcloud" "$fixture_root/tmp/gcloud"
+  ln -s ../../tmp/gcloud "$fixture_root/usr/bin/gcloud"
+  set +e
+  vm_backup_profile gs://fixture-backups/remote-chrome
+  status=$?
+  set -e
+  [[ $status -eq 69 && ! -e $FAKE_BROWSER_STOPPED ]] ||
+    fail 'backup must reject a fixed gcloud symlink that escapes the package target'
 }
 
 backup_upload_failure_restarts_stack() {

@@ -21,8 +21,10 @@ source "$installer_dir/lib/backup.sh"
 
 vm_installer_main() {
   vm_parse_args "$@" || return $?
-  vm_collect_configuration
   vm_init_paths
+  vm_load_installed_configuration ||
+    vm_die 78 'Installed configuration is invalid'
+  vm_collect_configuration
   vm_load_platform ||
     vm_die 65 'Unable to load platform metadata'
   vm_validate_platform ||
@@ -32,6 +34,10 @@ vm_installer_main() {
     vm_die 69 'DNS verification failed'
   vm_check_public_ports ||
     vm_die 69 'Ports 80 and 443 must be available'
+  vm_ensure_gcloud || {
+    vm_print_gcloud_guidance
+    vm_die 69 'Trusted Google Cloud CLI provisioning failed'
+  }
   vm_ensure_profile_exchange_runtime
   vm_install_docker
   [[ -n ${REMOTE_CHROME_RELEASE_ARCHIVE:-} ]] ||

@@ -107,3 +107,42 @@ vm_validate_domain() {
 vm_validate_email() {
   [[ ${1:-} =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]]
 }
+
+vm_validate_gcs_bucket() {
+  local bucket=${1:-}
+  ((${#bucket} >= 3 && ${#bucket} <= 63)) &&
+    [[ $bucket =~ ^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$ ]] &&
+    [[ $bucket != *..* ]]
+}
+
+vm_gcloud_path() {
+  if [[ -n ${REMOTE_CHROME_CANONICAL_TEST_ROOT:-} ]]; then
+    printf '%s/usr/bin/gcloud' "$REMOTE_CHROME_CANONICAL_TEST_ROOT"
+  else
+    printf '/usr/bin/gcloud'
+  fi
+}
+
+vm_trusted_gcloud() {
+  local command resolved package_target prefix=
+  command=$(vm_gcloud_path)
+  if [[ -n ${REMOTE_CHROME_CANONICAL_TEST_ROOT:-} ]]; then
+    prefix=$REMOTE_CHROME_CANONICAL_TEST_ROOT
+  fi
+  package_target="$prefix/usr/lib/google-cloud-sdk/bin/gcloud"
+  [[ -e $command && -x $command ]] || return 69
+  resolved=$(/usr/bin/readlink -f -- "$command") || return 69
+  if [[ -L $command ]]; then
+    [[ $resolved == "$package_target" ]] || return 69
+  else
+    [[ $resolved == "$command" && -f $command ]] || return 69
+  fi
+  [[ -f $resolved && ! -L $resolved && -x $resolved ]] || return 69
+  if [[ -z ${REMOTE_CHROME_CANONICAL_TEST_ROOT:-} ]]; then
+    local mode
+    [[ $(stat -c '%u' -- "$resolved") == 0 ]] || return 69
+    mode=$(stat -c '%a' -- "$resolved") || return 69
+    (( (8#$mode & 0022) == 0 )) || return 69
+  fi
+  printf '%s' "$command"
+}

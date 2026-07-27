@@ -45,12 +45,7 @@ vm_backup_validate_gcs_uri() {
 }
 
 vm_backup_gcloud_path() {
-  local command=/usr/bin/gcloud
-  if [[ -n ${REMOTE_CHROME_CANONICAL_TEST_ROOT:-} ]]; then
-    command="$REMOTE_CHROME_CANONICAL_TEST_ROOT/usr/bin/gcloud"
-  fi
-  [[ -f $command && ! -L $command && -x $command ]] || return 69
-  printf '%s' "$command"
+  vm_trusted_gcloud
 }
 
 vm_backup_trusted_tool() {

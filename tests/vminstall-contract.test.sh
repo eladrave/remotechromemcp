@@ -189,16 +189,101 @@ vm_parse_args \
   fail 'GCS bucket parser value was not preserved'
 [[ "$BACKUP_SCHEDULE" == '*-*-* 03:00:00' ]] ||
   fail 'backup schedule parser value was not preserved'
+[[ ${GCS_BUCKET_SET:-0} -eq 1 && ${BACKUP_SCHEDULE_SET:-0} -eq 1 ]] ||
+  fail 'explicit GCS values must be distinguished from omitted rerun values'
 [[ "$NON_INTERACTIVE" -eq 1 &&
    "$SKIP_DNS_CHECK" -eq 1 &&
    "$ROTATE_CREDENTIALS" -eq 1 ]] ||
   fail 'boolean installer flags were not preserved'
+
+vm_parse_args \
+  --domain chrome.example.com \
+  --email admin@example.com \
+  --data-dir "$test_root/data" \
+  --disable-gcs-backup \
+  --disable-backup-schedule \
+  --non-interactive
+[[ ${DISABLE_GCS_BACKUP:-0} -eq 1 &&
+   ${DISABLE_BACKUP_SCHEDULE:-0} -eq 1 ]] ||
+  fail 'safe GCS and schedule disable flags must be parsed explicitly'
+
+for conflicting_flags in \
+  '--gcs-bucket fixture-backups --disable-gcs-backup' \
+  '--backup-schedule daily --disable-backup-schedule'; do
+  read -r -a conflict_args <<<"$conflicting_flags"
+  set +e
+  (
+    vm_parse_args \
+      --domain chrome.example.com \
+      --email admin@example.com \
+      --data-dir "$test_root/data" \
+      --non-interactive \
+      "${conflict_args[@]}"
+  ) >"$test_root/conflict.stdout" 2>"$test_root/conflict.stderr"
+  conflict_status=$?
+  set -e
+  [[ $conflict_status -eq 2 ]] ||
+    fail "conflicting backup flags must exit 2: $conflicting_flags"
+done
 
 tty_fixture="$test_root/tty-input"
 printf 'prompted.example.com\n' >"$tty_fixture"
 prompted_value="$(REMOTE_CHROME_TTY="$tty_fixture" vm_prompt 'Domain: ')"
 [[ "$prompted_value" == prompted.example.com ]] ||
   fail 'wizard prompt must read from the explicit TTY path'
+
+wizard_input="$test_root/wizard-input"
+wizard_prompts="$test_root/wizard-prompts"
+printf '%s\n' \
+  guided.example.com \
+  admin@guided.example.com \
+  "$test_root/guided-data" \
+  yes \
+  guided-backups \
+  '*-*-* 03:00:00' >"$wizard_input"
+: >"$wizard_prompts"
+vm_parse_args
+REMOTE_CHROME_TTY="$wizard_input"
+REMOTE_CHROME_TTY_OUTPUT="$wizard_prompts"
+vm_collect_configuration
+[[ $DOMAIN == guided.example.com ]] ||
+  fail 'interactive wizard must collect the domain first'
+[[ $ACME_EMAIL == admin@guided.example.com ]] ||
+  fail 'interactive wizard must collect the certificate email second'
+[[ $REMOTE_CHROME_DATA_DIR == "$test_root/guided-data" ]] ||
+  fail 'interactive wizard must collect the data directory third'
+[[ $GCS_BUCKET == guided-backups ]] ||
+  fail 'interactive wizard must collect the selected GCS bucket'
+[[ $BACKUP_SCHEDULE == '*-*-* 03:00:00' ]] ||
+  fail 'interactive wizard must collect the optional backup schedule last'
+cat >"$test_root/expected-wizard-prompts" <<'EOF'
+The installer validates DNS and checks host ports 80 and 443 before provisioning.
+Domain:
+ACME certificate email:
+Data directory [/var/lib/remote-chrome]:
+Configure GCS backup? [y/N]:
+GCS bucket:
+Optional backup schedule (systemd OnCalendar, blank for none):
+EOF
+cmp -s "$test_root/expected-wizard-prompts" "$wizard_prompts" ||
+  fail 'interactive wizard must explain preflight and prompt in the documented order'
+
+stdin_canary="$test_root/stdin-canary"
+printf 'stdin.example.com\n' >"$stdin_canary"
+printf '%s\n' \
+  tty.example.com \
+  tty@example.com \
+  "$test_root/tty-data" \
+  no >"$wizard_input"
+: >"$wizard_prompts"
+vm_parse_args
+REMOTE_CHROME_TTY="$wizard_input"
+REMOTE_CHROME_TTY_OUTPUT="$wizard_prompts"
+vm_collect_configuration <"$stdin_canary"
+[[ $DOMAIN == tty.example.com && -z $GCS_BUCKET && -z $BACKUP_SCHEDULE ]] ||
+  fail 'interactive wizard must use only its TTY and skip GCS details after no'
+[[ $(<"$stdin_canary") == stdin.example.com ]] ||
+  fail 'interactive wizard must not consume piped standard input'
 
 missing_tty="$test_root/missing-tty"
 set +e
@@ -254,10 +339,71 @@ done
 [[ ! -e "$missing_tty" ]] ||
   fail 'noninteractive mode must not create or read a fallback input path'
 
+installed_root="$test_root/installed-rerun"
+mkdir "$installed_root"
+REMOTE_CHROME_TEST_ROOT="$installed_root"
+vm_init_paths
+mkdir -p "$REMOTE_CHROME_CONFIG_ROOT"
+cat >"$REMOTE_CHROME_CONFIG_ROOT/install.env" <<EOF
+DOMAIN=installed.example.com
+ACME_EMAIL='installed@example.com'
+REMOTE_CHROME_DATA_DIR='$installed_root/var/lib/remote-chrome'
+GCS_BUCKET='installed-backups'
+BACKUP_SCHEDULE='daily'
+SELECTED_VERSION=v1.0.0
+EOF
+chmod 0600 "$REMOTE_CHROME_CONFIG_ROOT/install.env"
+vm_parse_args
+vm_load_installed_configuration ||
+  fail 'valid installed configuration must load before rerun prompts'
+rerun_input="$installed_root/rerun-input"
+rerun_prompts="$installed_root/rerun-prompts"
+printf '\n\n\n\n' >"$rerun_input"
+: >"$rerun_prompts"
+REMOTE_CHROME_TTY="$rerun_input"
+REMOTE_CHROME_TTY_OUTPUT="$rerun_prompts"
+vm_collect_configuration
+[[ $DOMAIN == installed.example.com &&
+   $ACME_EMAIL == installed@example.com &&
+   $REMOTE_CHROME_DATA_DIR == "$installed_root/var/lib/remote-chrome" &&
+   $GCS_BUCKET == installed-backups &&
+   $BACKUP_SCHEDULE == daily ]] ||
+  fail 'blank interactive rerun answers must preserve valid installed settings'
+
+unsafe_config_target="$test_root/unsafe-install.env"
+cp "$REMOTE_CHROME_CONFIG_ROOT/install.env" "$unsafe_config_target"
+for unsafe_type in symlink directory; do
+  unsafe_root="$test_root/installed-$unsafe_type"
+  mkdir "$unsafe_root"
+  REMOTE_CHROME_TEST_ROOT="$unsafe_root"
+  vm_init_paths
+  mkdir -p "$REMOTE_CHROME_CONFIG_ROOT"
+  case "$unsafe_type" in
+    symlink)
+      ln -s "$unsafe_config_target" "$REMOTE_CHROME_CONFIG_ROOT/install.env"
+      ;;
+    directory)
+      mkdir "$REMOTE_CHROME_CONFIG_ROOT/install.env"
+      ;;
+  esac
+  vm_parse_args
+  set +e
+  (vm_load_installed_configuration) \
+    >"$unsafe_root/config.stdout" 2>"$unsafe_root/config.stderr"
+  unsafe_config_status=$?
+  set -e
+  [[ $unsafe_config_status -ne 0 ]] ||
+    fail "installed $unsafe_type configuration must fail closed before prompts"
+done
+REMOTE_CHROME_TEST_ROOT="$test_root"
+vm_init_paths
+
 declare -F vm_stage_release >/dev/null ||
   fail 'vm_stage_release is undefined'
 declare -F vm_verify_release >/dev/null ||
   fail 'vm_verify_release is undefined'
+declare -F vm_ensure_gcloud >/dev/null ||
+  fail 'vm_ensure_gcloud is undefined'
 for management_function in \
   vm_prepare_config vm_generate_credentials vm_render_compose_env \
   vm_activate_release vm_rollback_release vm_verify_public_stack \
@@ -265,6 +411,141 @@ for management_function in \
   declare -F "$management_function" >/dev/null ||
     fail "$management_function is undefined"
 done
+
+gcloud_root="$test_root/gcloud"
+mkdir "$gcloud_root"
+REMOTE_CHROME_TEST_ROOT="$gcloud_root"
+REMOTE_CHROME_DRY_RUN=1
+REMOTE_CHROME_TEST_EUID=0
+vm_init_paths
+gcloud_log="$gcloud_root/gcloud-commands.log"
+COMMAND_LOG="$gcloud_log"
+: >"$gcloud_log"
+GCS_BUCKET=
+vm_ensure_gcloud
+[[ ! -s $gcloud_log ]] ||
+  fail 'gcloud provisioning must not run when GCS backup is not configured'
+
+poisoned_path="$gcloud_root/poisoned-bin"
+mkdir "$poisoned_path"
+cat >"$poisoned_path/gcloud" <<'EOF'
+#!/usr/bin/env bash
+printf 'PATH gcloud must not run\n' >&2
+exit 91
+EOF
+chmod +x "$poisoned_path/gcloud"
+PATH="$poisoned_path:$PATH"
+GCS_BUCKET=guided-backups
+vm_ensure_gcloud
+trusted_gcloud="$gcloud_root/usr/bin/gcloud"
+[[ -f $trusted_gcloud && ! -L $trusted_gcloud && -x $trusted_gcloud ]] ||
+  fail 'GCS setup must provision the trusted fixed /usr/bin/gcloud target'
+grep -Fq \
+  'curl <-fsSL> <--max-time> <30> <https://packages.cloud.google.com/apt/doc/apt-key.gpg>' \
+  "$gcloud_log" ||
+  fail 'gcloud setup must fetch the official key into an atomic temporary'
+grep -Fq \
+  'gpg <--dearmor> <--output>' "$gcloud_log" ||
+  fail 'gcloud setup must dearmor the official key without a privileged pipe'
+grep -Fxq 'apt-get <install> <-y> <google-cloud-cli>' "$gcloud_log" ||
+  fail 'gcloud setup must install only the official google-cloud-cli package'
+gcloud_source="$gcloud_root/etc/apt/sources.list.d/google-cloud-sdk.list"
+grep -Fxq \
+  "deb [signed-by=$gcloud_root/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
+  "$gcloud_source" ||
+  fail 'gcloud setup must use the official signed-by apt repository'
+! grep -Eqi '(^|[[:space:]<])(snap|gcloud[[:space:]<]+init)([[:space:]>]|$)' \
+  "$gcloud_log" ||
+  fail 'gcloud provisioning must never use snap or gcloud init'
+
+: >"$gcloud_log"
+vm_ensure_gcloud
+[[ ! -s $gcloud_log ]] ||
+  fail 'an existing trusted fixed gcloud executable must not reinstall'
+
+rm -f "$trusted_gcloud"
+ln -s "$poisoned_path/gcloud" "$trusted_gcloud"
+set +e
+(vm_ensure_gcloud) >"$gcloud_root/symlink.stdout" \
+  2>"$gcloud_root/symlink.stderr"
+gcloud_symlink_status=$?
+set -e
+[[ $gcloud_symlink_status -ne 0 ]] ||
+  fail 'trusted gcloud validation must reject a symlink target'
+rm -f "$trusted_gcloud"
+
+for failure_step in curl gpg install-source apt-final restore-failure; do
+  rollback_root="$test_root/gcloud-rollback-$failure_step"
+  mkdir "$rollback_root"
+  REMOTE_CHROME_TEST_ROOT="$rollback_root"
+  vm_init_paths
+  rollback_key="$rollback_root/usr/share/keyrings/cloud.google.gpg"
+  rollback_source="$rollback_root/etc/apt/sources.list.d/google-cloud-sdk.list"
+  mkdir -p "${rollback_key%/*}" "${rollback_source%/*}"
+  printf 'prior-key\n' >"$rollback_key"
+  printf 'prior-source\n' >"$rollback_source"
+  rollback_log="$rollback_root/commands.log"
+  : >"$rollback_log"
+  set +e
+  (
+    REMOTE_CHROME_DRY_RUN=1
+    REMOTE_CHROME_TEST_EUID=0
+    COMMAND_LOG="$rollback_log"
+    GCS_BUCKET=guided-backups
+    mutation_install_count=0
+    provisioning_failed=0
+    vm_run_mutation() {
+      vm_log_command "$@" || return 1
+      case "$failure_step:$1:$*" in
+        curl:curl:*) return 91 ;;
+        gpg:gpg:*) return 92 ;;
+        install-source:install:*)
+          mutation_install_count=$((mutation_install_count + 1))
+          ((mutation_install_count != 2)) || return 93
+          ;;
+        apt-final:apt-get:*google-cloud-cli*) return 94 ;;
+        restore-failure:apt-get:*google-cloud-cli*)
+          provisioning_failed=1
+          return 94
+          ;;
+        restore-failure:install:*)
+          ((provisioning_failed == 0)) || return 95
+          ;;
+      esac
+      return 0
+    }
+    vm_ensure_gcloud
+  ) >"$rollback_root/stdout" 2>"$rollback_root/stderr"
+  rollback_status=$?
+  set -e
+  [[ $rollback_status -ne 0 ]] ||
+    fail "gcloud failure injection must fail at $failure_step"
+  if [[ $failure_step == restore-failure ]]; then
+    [[ $rollback_status -eq 70 ]] ||
+      fail 'uncertain gcloud apt rollback must return distinct status 70'
+    grep -Fq 'apt rollback could not be confirmed' \
+      "$rollback_root/stderr" ||
+      fail 'uncertain gcloud apt rollback must report the recovery state'
+    retained_stage=$(
+      sed -n 's/^  staging: //p' "$rollback_root/stderr" | tail -n 1
+    )
+    [[ $retained_stage == /tmp/* && -d $retained_stage ]] ||
+      fail 'uncertain gcloud apt rollback must retain its staging snapshot'
+    rm -rf -- "$retained_stage"
+  else
+    [[ $(<"$rollback_key") == prior-key &&
+       $(<"$rollback_source") == prior-source ]] ||
+      fail "gcloud failure at $failure_step must restore the prior apt key and source"
+  fi
+  [[ -z $(find "${rollback_key%/*}" "${rollback_source%/*}" \
+      -name '*.pending.*' -print -quit) ]] ||
+    fail "gcloud failure at $failure_step must remove pending apt configuration"
+done
+
+unset REMOTE_CHROME_DRY_RUN REMOTE_CHROME_TEST_EUID
+PATH=${PATH#"$poisoned_path:"}
+REMOTE_CHROME_TEST_ROOT="$test_root"
+vm_init_paths
 
 release_fixture="$test_root/release-fixtures"
 mkdir "$release_fixture"

@@ -327,6 +327,14 @@ ACME_EMAIL=ops@example.com
 REMOTE_CHROME_DATA_DIR="$REMOTE_CHROME_TEST_ROOT/data/../data"
 GCS_BUCKET=fixture-backups
 BACKUP_SCHEDULE='*-*-* 03:00:00'
+DOMAIN_SET=1
+EMAIL_SET=1
+DATA_DIR_SET=1
+GCS_BUCKET_SET=1
+BACKUP_SCHEDULE_SET=1
+DISABLE_GCS_BACKUP=0
+DISABLE_BACKUP_SCHEDULE=0
+INSTALLATION_EXISTS=0
 ROTATE_CREDENTIALS=0
 SELECTED_VERSION=v1.2.3
 REMOTE_CHROME_TRANSITION_LOG="$REMOTE_CHROME_TEST_ROOT/transitions.log"
@@ -361,11 +369,28 @@ grep -Fxq 'openssl <rand> <-base64> <48>' "$fake_log" ||
 canonical_data=$(realpath -m "$REMOTE_CHROME_DATA_DIR")
 [[ $(read_env_value "$install_candidate" REMOTE_CHROME_DATA_DIR) == "$canonical_data" ]] ||
   fail 'data directory must be stored canonically'
+grep -Fxq "chown <root:10001> <$canonical_data>" "$fake_log" ||
+  fail 'fresh data root must grant traversal only to the fixed container group'
+[[ $(stat -c '%a' "$canonical_data") == 710 ]] ||
+  fail 'fresh data root must be root-owned and group-traversable without broad access'
 for data_subdir in profile caddy-data caddy-config backups restore-staging; do
   data_path="$canonical_data/$data_subdir"
   [[ -d $data_path && $(realpath -m "$data_path") == "$canonical_data"/* ]] ||
     fail "$data_subdir must remain beneath the canonical data root"
 done
+! find "$canonical_data" -maxdepth 1 -printf '%m %p\n' |
+  grep -Eq '^777 ' ||
+  fail 'runtime directories must never use world-writable mode 777'
+for writable_subdir in profile caddy-data caddy-config; do
+  grep -Fxq "chown <10001:10001> <$canonical_data/$writable_subdir>" \
+    "$fake_log" ||
+    fail "$writable_subdir must receive the fixed container UID/GID on creation"
+  [[ $(stat -c '%a' "$canonical_data/$writable_subdir") == 700 ]] ||
+    fail "$writable_subdir must not be writable outside the container identity"
+done
+initial_profile_chowns=$(
+  grep -Fxc "chown <10001:10001> <$canonical_data/profile>" "$fake_log"
+)
 touch "$canonical_data/caddy-data/preserve" "$canonical_data/caddy-config/preserve"
 
 grep -Fxq "LOGIN_PASSWORD_HASH='$first_hash'" "$compose_candidate" ||
@@ -425,6 +450,14 @@ ACME_EMAIL=changed@example.com
 REMOTE_CHROME_DATA_DIR="$REMOTE_CHROME_TEST_ROOT/changed-data"
 GCS_BUCKET=changed-bucket
 BACKUP_SCHEDULE='daily'
+DOMAIN_SET=0
+EMAIL_SET=0
+DATA_DIR_SET=0
+GCS_BUCKET_SET=0
+BACKUP_SCHEDULE_SET=0
+DISABLE_GCS_BACKUP=0
+DISABLE_BACKUP_SCHEDULE=0
+INSTALLATION_EXISTS=1
 ROTATE_CREDENTIALS=0
 vm_prepare_config
 [[ $(read_env_value "$credentials_candidate" MCP_TOKEN) == "$first_token" ]] ||
@@ -442,6 +475,59 @@ vm_prepare_config
 [[ -f $canonical_data/caddy-data/preserve &&
    -f $canonical_data/caddy-config/preserve ]] ||
   fail 'reinstall must preserve Caddy state directories'
+[[ $(grep -Fxc "chown <10001:10001> <$canonical_data/profile>" "$fake_log") \
+   -eq $initial_profile_chowns ]] ||
+  fail 'rerun must preserve existing profile ownership without a recursive chown'
+
+printf 'profile-owner-preserved\n' >"$canonical_data/profile/owner-canary"
+chmod 0700 "$canonical_data"
+root_repair_chowns_before=$(
+  grep -Fxc "chown <root:10001> <$canonical_data>" "$fake_log" || true
+)
+vm_prepare_config
+[[ $(stat -c '%a' "$canonical_data") == 710 ]] ||
+  fail 'rerun must repair data-root traversal without opening broader access'
+[[ $(grep -Fxc "chown <root:10001> <$canonical_data>" "$fake_log") \
+   -gt $root_repair_chowns_before ]] ||
+  fail 'rerun must repair only the canonical data-root group ownership'
+[[ $(<"$canonical_data/profile/owner-canary") == profile-owner-preserved ]] ||
+  fail 'data-root traversal repair must preserve profile content'
+[[ $(grep -Fxc "chown <10001:10001> <$canonical_data/profile>" "$fake_log") \
+   -eq $initial_profile_chowns ]] ||
+  fail 'data-root traversal repair must not chown the existing profile'
+
+GCS_BUCKET=updated-backups
+BACKUP_SCHEDULE='Mon..Fri 02:30'
+GCS_BUCKET_SET=1
+BACKUP_SCHEDULE_SET=1
+vm_prepare_config
+[[ $(read_env_value "$install_candidate" GCS_BUCKET) == updated-backups ]] ||
+  fail 'an explicitly supplied GCS bucket must update installed configuration'
+[[ $(read_env_value "$install_candidate" BACKUP_SCHEDULE) == \
+   'Mon..Fri 02:30' ]] ||
+  fail 'an explicitly supplied backup schedule must update installed configuration'
+
+GCS_BUCKET_SET=0
+BACKUP_SCHEDULE_SET=0
+DISABLE_BACKUP_SCHEDULE=1
+vm_prepare_config
+[[ $(read_env_value "$install_candidate" GCS_BUCKET) == fixture-backups ]] ||
+  fail 'disabling only the schedule must preserve the installed GCS bucket'
+[[ -z $(read_env_value "$install_candidate" BACKUP_SCHEDULE) ]] ||
+  fail 'the explicit schedule-disable flag must clear only the schedule'
+[[ -f $canonical_data/caddy-data/preserve &&
+   -f $canonical_data/caddy-config/preserve ]] ||
+  fail 'disabling a schedule must not mutate persistent container data'
+
+DISABLE_GCS_BACKUP=1
+DISABLE_BACKUP_SCHEDULE=0
+vm_prepare_config
+[[ -z $(read_env_value "$install_candidate" GCS_BUCKET) &&
+   -z $(read_env_value "$install_candidate" BACKUP_SCHEDULE) ]] ||
+  fail 'disabling GCS backup must safely clear the bucket and its schedule'
+[[ -f $canonical_data/caddy-data/preserve &&
+   -f $canonical_data/caddy-config/preserve ]] ||
+  fail 'disabling GCS backup must not mutate browser or Caddy data'
 
 ROTATE_CREDENTIALS=1
 vm_prepare_config
@@ -505,6 +591,14 @@ setup_activation_fixture() {
   REMOTE_CHROME_DATA_DIR="$root/var/lib/remote-chrome"
   GCS_BUCKET=fixture-backups
   BACKUP_SCHEDULE='*-*-* 03:00:00'
+  DOMAIN_SET=1
+  EMAIL_SET=1
+  DATA_DIR_SET=1
+  GCS_BUCKET_SET=1
+  BACKUP_SCHEDULE_SET=1
+  DISABLE_GCS_BACKUP=0
+  DISABLE_BACKUP_SCHEDULE=0
+  INSTALLATION_EXISTS=0
   ROTATE_CREDENTIALS=0
   SELECTED_VERSION=v1.0.0
   vm_prepare_config
@@ -681,6 +775,7 @@ cp vminstall/remote-chrome-backup.timer.in \
 : >"$REMOTE_CHROME_FAKE_SYSTEMD_STATE/backup-timer.active"
 sed -i 's/^BACKUP_SCHEDULE=.*$/BACKUP_SCHEDULE=/' \
   "$REMOTE_CHROME_CONFIG_ROOT/install.env"
+BACKUP_SCHEDULE_SET=0
 export REMOTE_CHROME_FAKE_TIMER_DISABLE_FAIL=1
 set +e
 vm_activate_release >"$timer_removal_failure_root/stdout" \
