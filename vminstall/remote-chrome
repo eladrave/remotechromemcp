@@ -1,12 +1,77 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ -n ${REMOTE_CHROME_TEST_ROOT:-} ]]; then
-  install_root="$(realpath -m -- "$REMOTE_CHROME_TEST_ROOT")/opt/remotechromemcp"
+requested_test_euid=${REMOTE_CHROME_TEST_EUID:-}
+requested_tty=${REMOTE_CHROME_TTY:-}
+unset REMOTE_CHROME_TEST_ROOT REMOTE_CHROME_CANONICAL_TEST_ROOT \
+  REMOTE_CHROME_INSTALL_ROOT REMOTE_CHROME_CONFIG_ROOT \
+  REMOTE_CHROME_SYSTEMD_ROOT REMOTE_CHROME_CLI_ROOT \
+  REMOTE_CHROME_TRUSTED_INSTALL_ROOT REMOTE_CHROME_TRUSTED_CONFIG_ROOT \
+  REMOTE_CHROME_TRUSTED_SYSTEMD_ROOT REMOTE_CHROME_TRUSTED_CLI_ROOT \
+  REMOTE_CHROME_TEST_EUID REMOTE_CHROME_TTY
+
+executable=$(/usr/bin/realpath -e -- "${BASH_SOURCE[0]}") || {
+  printf 'ERROR: unable to resolve installed management executable\n' >&2
+  exit 69
+}
+[[ -f $executable && ! -L $executable ]] || {
+  printf 'ERROR: installed management executable is not a regular file\n' >&2
+  exit 69
+}
+
+case "$executable" in
+  /usr/local/sbin/remote-chrome)
+    test_prefix=
+    ;;
+  /tmp/*/usr/local/sbin/remote-chrome)
+    test_prefix=${executable%/usr/local/sbin/remote-chrome}
+    [[ $test_prefix == /tmp/* && -d $test_prefix &&
+       ! -L $test_prefix &&
+       $(/usr/bin/realpath -e -- "$test_prefix") == "$test_prefix" ]] || {
+      printf 'ERROR: installed test prefix is not canonical\n' >&2
+      exit 64
+    }
+    ;;
+  *)
+    printf 'ERROR: remote-chrome must run from its installed location\n' >&2
+    exit 64
+    ;;
+esac
+
+if [[ -n $test_prefix ]]; then
+  REMOTE_CHROME_TEST_ROOT=$test_prefix
+  REMOTE_CHROME_CANONICAL_TEST_ROOT=$test_prefix
+  REMOTE_CHROME_INSTALL_ROOT="$test_prefix/opt/remotechromemcp"
+  REMOTE_CHROME_CONFIG_ROOT="$test_prefix/etc/remote-chrome"
+  REMOTE_CHROME_SYSTEMD_ROOT="$test_prefix/etc/systemd/system"
+  REMOTE_CHROME_CLI_ROOT="$test_prefix/usr/local/sbin"
+  REMOTE_CHROME_TEST_EUID=${requested_test_euid:-$EUID}
+  REMOTE_CHROME_TTY=${requested_tty:-/dev/tty}
 else
-  install_root=/opt/remotechromemcp
+  REMOTE_CHROME_INSTALL_ROOT=/opt/remotechromemcp
+  REMOTE_CHROME_CONFIG_ROOT=/etc/remote-chrome
+  REMOTE_CHROME_SYSTEMD_ROOT=/etc/systemd/system
+  REMOTE_CHROME_CLI_ROOT=/usr/local/sbin
+  REMOTE_CHROME_TTY=/dev/tty
 fi
-current="$install_root/current"
+REMOTE_CHROME_TRUSTED_INSTALL_ROOT=$REMOTE_CHROME_INSTALL_ROOT
+REMOTE_CHROME_TRUSTED_CONFIG_ROOT=$REMOTE_CHROME_CONFIG_ROOT
+REMOTE_CHROME_TRUSTED_SYSTEMD_ROOT=$REMOTE_CHROME_SYSTEMD_ROOT
+REMOTE_CHROME_TRUSTED_CLI_ROOT=$REMOTE_CHROME_CLI_ROOT
+export REMOTE_CHROME_TEST_ROOT REMOTE_CHROME_CANONICAL_TEST_ROOT \
+  REMOTE_CHROME_INSTALL_ROOT REMOTE_CHROME_CONFIG_ROOT \
+  REMOTE_CHROME_SYSTEMD_ROOT REMOTE_CHROME_CLI_ROOT \
+  REMOTE_CHROME_TRUSTED_INSTALL_ROOT REMOTE_CHROME_TRUSTED_CONFIG_ROOT \
+  REMOTE_CHROME_TRUSTED_SYSTEMD_ROOT REMOTE_CHROME_TRUSTED_CLI_ROOT \
+  REMOTE_CHROME_TEST_EUID REMOTE_CHROME_TTY
+readonly REMOTE_CHROME_TEST_ROOT REMOTE_CHROME_CANONICAL_TEST_ROOT \
+  REMOTE_CHROME_INSTALL_ROOT REMOTE_CHROME_CONFIG_ROOT \
+  REMOTE_CHROME_SYSTEMD_ROOT REMOTE_CHROME_CLI_ROOT \
+  REMOTE_CHROME_TRUSTED_INSTALL_ROOT REMOTE_CHROME_TRUSTED_CONFIG_ROOT \
+  REMOTE_CHROME_TRUSTED_SYSTEMD_ROOT REMOTE_CHROME_TRUSTED_CLI_ROOT \
+  REMOTE_CHROME_TEST_EUID REMOTE_CHROME_TTY
+
+current="$REMOTE_CHROME_INSTALL_ROOT/current"
 
 for library in common wizard config release activate management; do
   library_path="$current/vminstall/lib/$library.sh"
@@ -19,5 +84,4 @@ for library in common wizard config release activate management; do
   source "$library_path"
 done
 
-vm_init_paths
 vm_management_dispatch "${1:-}" "${@:2}"

@@ -11,10 +11,42 @@ vm_activation_transition() {
   [[ ${REMOTE_CHROME_FAIL_AT:-} != "$transition" ]]
 }
 
+vm_validate_integer_bound() {
+  local value=$1 minimum=$2 maximum=$3
+  [[ $value =~ ^[0-9]+$ ]] &&
+    ((value >= minimum && value <= maximum))
+}
+
+vm_command_timeout() {
+  local value=${REMOTE_CHROME_COMMAND_TIMEOUT:-15}
+  vm_validate_integer_bound "$value" 1 120 || {
+    printf 'ERROR: REMOTE_CHROME_COMMAND_TIMEOUT must be between 1 and 120\n' >&2
+    return 64
+  }
+  printf '%s' "$value"
+}
+
+vm_run_with_timeout() {
+  local seconds=$1
+  shift
+  vm_validate_integer_bound "$seconds" 1 600 || return 64
+  local status=0
+  /usr/bin/timeout --foreground --kill-after=2 "${seconds}s" "$@" ||
+    status=$?
+  [[ $status -ne 124 && $status -ne 137 ]] || return 75
+  return "$status"
+}
+
+vm_run_bounded() {
+  local seconds
+  seconds=$(vm_command_timeout) || return $?
+  vm_run_with_timeout "$seconds" "$@"
+}
+
 vm_compose_for_release() {
   local release=$1 env_file=$2
   shift 2
-  docker compose \
+  vm_run_bounded docker compose \
     -f "$release/compose.yaml" \
     -f "$release/vminstall/compose.vm.yaml" \
     --env-file "$env_file" "$@"
@@ -24,7 +56,23 @@ vm_wait_stack_health() {
   local release=$1
   local attempts=${REMOTE_CHROME_HEALTH_ATTEMPTS:-20}
   local delay=${REMOTE_CHROME_HEALTH_DELAY:-2}
-  [[ -n ${REMOTE_CHROME_TEST_ROOT:-} ]] && delay=0
+  vm_validate_integer_bound "$attempts" 1 60 || {
+    printf 'ERROR: REMOTE_CHROME_HEALTH_ATTEMPTS must be between 1 and 60\n' >&2
+    return 64
+  }
+  if [[ -n ${REMOTE_CHROME_CANONICAL_TEST_ROOT:-} ]]; then
+    vm_validate_integer_bound "$delay" 0 30 || {
+      printf 'ERROR: REMOTE_CHROME_HEALTH_DELAY must be between 0 and 30\n' >&2
+      return 64
+    }
+    delay=0
+  else
+    vm_validate_integer_bound "$delay" 1 30 || {
+      printf 'ERROR: REMOTE_CHROME_HEALTH_DELAY must be between 1 and 30\n' >&2
+      return 64
+    }
+  fi
+  vm_command_timeout >/dev/null || return $?
   local output
   while ((attempts > 0)); do
     output=$(
@@ -43,7 +91,7 @@ vm_wait_stack_health() {
 }
 
 vm_curl_status() {
-  curl --silent --show-error --dump-header "$1" --output "$2" \
+  vm_run_bounded curl --silent --show-error --dump-header "$1" --output "$2" \
     --connect-timeout 5 --max-time 10 \
     --request "$3" "${@:4}" --write-out '%{http_code}'
 }
@@ -51,11 +99,11 @@ vm_curl_status() {
 vm_capture_certificate_metadata() {
   local metadata issuer expires
   metadata=$(
-    timeout 5 openssl s_client \
+    vm_run_with_timeout 5 openssl s_client \
       -connect "$DOMAIN:443" \
       -servername "$DOMAIN" \
       -verify_return_error </dev/null 2>/dev/null |
-      openssl x509 -noout -issuer -enddate
+      vm_run_with_timeout 5 openssl x509 -noout -issuer -enddate
   ) || return 1
   issuer=$(
     awk 'index($0, "issuer=") == 1 {
@@ -98,6 +146,7 @@ vm_verify_public_stack() {
   local response_body="$verify_dir/response.body"
   local login_headers="$verify_dir/login.headers"
   local empty_headers="$verify_dir/empty.headers"
+  local anonymous_headers="$verify_dir/anonymous.headers"
   local status session content_type_count basic_value websocket_curl_status
   local result=0
 
@@ -110,6 +159,15 @@ vm_verify_public_stack() {
     printf 'Authorization: Basic %s\n' \
       "$(printf '%s:%s' "$LOGIN_USERNAME" "$LOGIN_PASSWORD" | base64 -w0)"
   } | vm_write_secret_file "$basic_headers" || result=1
+  if ((result == 0)); then
+    status=$(vm_curl_status "$anonymous_headers" "$response_body" POST \
+      --header 'Content-Type: application/json' \
+      --header 'Accept: application/json, text/event-stream' \
+      --data-binary \
+      '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"remote-chrome-anonymous-check","version":"1"}}}' \
+      "$MCP_URL") || result=1
+    [[ $status == 401 ]] || result=1
+  fi
   if ((result == 0)); then
     status=$(vm_curl_status "$response_headers" "$response_body" POST \
       --header "@$auth_headers" \
@@ -213,6 +271,7 @@ vm_snapshot_activation_state() {
     "$REMOTE_CHROME_CONFIG_ROOT/credentials.env" \
     "$REMOTE_CHROME_CONFIG_ROOT/certificate.env" \
     "$REMOTE_CHROME_CONFIG_ROOT/active-version" \
+    "$REMOTE_CHROME_CONFIG_ROOT/previous-version" \
     "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome.service"; do
     name=${source##*/}
     if [[ -e $source || -L $source ]]; then
@@ -229,10 +288,10 @@ vm_snapshot_activation_state() {
       "$snapshot/remote-chrome.cli" || return 1
     : >"$snapshot/remote-chrome.cli.present"
   fi
-  if systemctl is-enabled --quiet remote-chrome.service; then
+  if vm_run_bounded systemctl is-enabled --quiet remote-chrome.service; then
     : >"$snapshot/service.enabled"
   fi
-  if systemctl is-active --quiet remote-chrome.service; then
+  if vm_run_bounded systemctl is-active --quiet remote-chrome.service; then
     : >"$snapshot/service.active"
   fi
 }
@@ -256,6 +315,7 @@ vm_restore_activation_state() {
     "$REMOTE_CHROME_CONFIG_ROOT/credentials.env" \
     "$REMOTE_CHROME_CONFIG_ROOT/certificate.env" \
     "$REMOTE_CHROME_CONFIG_ROOT/active-version" \
+    "$REMOTE_CHROME_CONFIG_ROOT/previous-version" \
     "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome.service"; do
     name=${destination##*/}
     mode=0600
@@ -390,8 +450,8 @@ vm_rollback_release() {
   local previous_target=$1 snapshot=$2 candidate_release=$3
   local rollback_failed=0 prior_health_failed=0
   vm_stop_candidate_release "$candidate_release" || rollback_failed=1
-  systemctl stop remote-chrome.service || rollback_failed=1
-  systemctl disable remote-chrome.service || rollback_failed=1
+  vm_run_bounded systemctl stop remote-chrome.service || rollback_failed=1
+  vm_run_bounded systemctl disable remote-chrome.service || rollback_failed=1
 
   if [[ -n $previous_target ]]; then
     vm_switch_current "$previous_target" || rollback_failed=1
@@ -399,13 +459,14 @@ vm_rollback_release() {
     rm -f -- "$REMOTE_CHROME_INSTALL_ROOT/current" || rollback_failed=1
   fi
   vm_restore_activation_state "$snapshot" || rollback_failed=1
-  systemctl daemon-reload || rollback_failed=1
+  vm_run_bounded systemctl daemon-reload || rollback_failed=1
 
   if [[ -f $snapshot/service.enabled ]]; then
-    systemctl enable remote-chrome.service || rollback_failed=1
+    vm_run_bounded systemctl enable remote-chrome.service ||
+      rollback_failed=1
   fi
   if [[ -f $snapshot/service.active ]]; then
-    systemctl start remote-chrome.service || rollback_failed=1
+    vm_run_bounded systemctl start remote-chrome.service || rollback_failed=1
     if [[ -z $previous_target ]] || ! REMOTE_CHROME_ROLLBACK=1 \
       vm_wait_stack_health "$REMOTE_CHROME_INSTALL_ROOT/$previous_target"; then
       prior_health_failed=1
@@ -424,6 +485,7 @@ vm_activate_release() {
   local snapshot="$REMOTE_CHROME_CONFIG_ROOT/.rollback.$$"
   local candidate_release="$REMOTE_CHROME_INSTALL_ROOT/releases/$SELECTED_VERSION"
   local switched=0 installed_candidate=0 result=1 rollback_status=0
+  local previous_version=
   VM_CANDIDATE_STOP_CONFIRMED=0
 
   [[ -n ${STAGED_RELEASE_DIR:-} ]] || return 1
@@ -465,12 +527,21 @@ vm_activate_release() {
      vm_activation_transition current-switched &&
      vm_install_candidate_config &&
      vm_activation_transition config-installed &&
-     systemctl daemon-reload &&
+     vm_run_bounded systemctl daemon-reload &&
      vm_activation_transition service-reloaded &&
-     systemctl enable --now remote-chrome.service &&
+     vm_run_bounded systemctl enable --now remote-chrome.service &&
      vm_activation_transition service-started &&
      vm_activation_transition health-verified &&
      vm_activation_transition public-verified &&
+     { if [[ -n $previous_target ]]; then
+         previous_version=${previous_target#releases/}
+         vm_validate_release_ref "$previous_version" &&
+           printf '%s\n' "$previous_version" |
+             vm_write_secret_file \
+               "$REMOTE_CHROME_CONFIG_ROOT/previous-version"
+       else
+         rm -f -- "$REMOTE_CHROME_CONFIG_ROOT/previous-version"
+       fi; } &&
      printf '%s\n' "$SELECTED_VERSION" |
        vm_write_secret_file "$REMOTE_CHROME_CONFIG_ROOT/active-version" &&
      vm_activation_transition active-recorded; then

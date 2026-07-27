@@ -103,24 +103,23 @@ vm_management_ready() {
 }
 
 vm_management_prior_release() {
-  local active=$1 releases="$REMOTE_CHROME_INSTALL_ROOT/releases"
-  local candidate name prior=
-  [[ -d $releases && ! -L $releases ]] || {
+  local active=$1 state="$REMOTE_CHROME_CONFIG_ROOT/previous-version"
+  local prior=
+  if [[ ! -e $state && ! -L $state ]]; then
     printf 'none'
     return 0
-  }
-  while IFS= read -r candidate; do
-    name=${candidate##*/}
-    [[ $name != "$active" && $name != .staging-* ]] || continue
-    prior=$name
-  done < <(find "$releases" -mindepth 1 -maxdepth 1 -type d -print |
-    LC_ALL=C sort)
-  printf '%s' "${prior:-none}"
+  fi
+  [[ -f $state && ! -L $state &&
+     $(awk 'END { print NR }' "$state") == 1 ]] || return 1
+  IFS= read -r prior <"$state" || return 1
+  vm_validate_release_ref "$prior" || return 1
+  [[ $prior != "$active" ]] || return 1
+  printf '%s' "$prior"
 }
 
 vm_management_usage_text() {
   local path=$1
-  du -sh -- "$path" 2>/dev/null | awk '{ print $1 }'
+  vm_run_bounded du -sh -- "$path" 2>/dev/null | awk '{ print $1 }'
 }
 
 vm_management_status() {
@@ -140,7 +139,7 @@ vm_management_status() {
   vm_validate_release_ref "$active" || return 1
   release=$(vm_management_release_path) || return 1
   prior=$(vm_management_prior_release "$active") || return 1
-  if systemctl is-active --quiet remote-chrome.service; then
+  if vm_run_bounded systemctl is-active --quiet remote-chrome.service; then
     service=active
   else
     service=inactive
@@ -157,7 +156,8 @@ vm_management_status() {
     vm_management_usage_text "$REMOTE_CHROME_DATA_DIR"
   ) || data_usage=unavailable
   manifest=$(
-    find "$REMOTE_CHROME_DATA_DIR/backups" -mindepth 1 -maxdepth 1 \
+    vm_run_bounded find "$REMOTE_CHROME_DATA_DIR/backups" \
+      -mindepth 1 -maxdepth 1 \
       -type f -name '*.manifest' -printf '%f\n' 2>/dev/null |
       LC_ALL=C sort | tail -n 1
   )
@@ -215,13 +215,13 @@ vm_management_download_release() {
   else
     archive_url="https://github.com/eladrave/remotechromemcp/releases/download/$ref/$archive_name"
   fi
-  if ! curl -fsSL --connect-timeout 10 --max-time 300 \
+  if ! vm_run_with_timeout 310 curl -fsSL --connect-timeout 10 --max-time 300 \
     "$archive_url" -o "$download_dir/$archive_name"; then
     rm -rf -- "$download_dir"
     return 1
   fi
   if [[ $ref != master ]] &&
-     ! curl -fsSL --connect-timeout 10 --max-time 30 \
+     ! vm_run_with_timeout 40 curl -fsSL --connect-timeout 10 --max-time 30 \
        "$archive_url.sha256" -o "$download_dir/$archive_name.sha256"; then
     rm -rf -- "$download_dir"
     return 1
@@ -303,8 +303,10 @@ vm_management_validate_data_root() {
   esac
   local protected
   for protected in \
-    "$REMOTE_CHROME_INSTALL_ROOT" "$REMOTE_CHROME_CONFIG_ROOT" \
-    "$REMOTE_CHROME_SYSTEMD_ROOT" "$REMOTE_CHROME_CLI_ROOT"; do
+    "$REMOTE_CHROME_TRUSTED_INSTALL_ROOT" \
+    "$REMOTE_CHROME_TRUSTED_CONFIG_ROOT" \
+    "$REMOTE_CHROME_TRUSTED_SYSTEMD_ROOT" \
+    "$REMOTE_CHROME_TRUSTED_CLI_ROOT"; do
     case "$protected" in
       "$data_root"|"$data_root"/*) return 1 ;;
     esac
@@ -322,6 +324,14 @@ vm_management_validate_delete_target() {
      ! -L $target ]] || return 1
   [[ $(realpath -sm -- "$target") == "$expected" ]] || return 1
   vm_require_management_destination "$target"
+}
+
+vm_management_confirmation_tty() {
+  if [[ -n ${REMOTE_CHROME_CANONICAL_TEST_ROOT:-} ]]; then
+    printf '%s' "$REMOTE_CHROME_TTY"
+  else
+    printf '/dev/tty'
+  fi
 }
 
 vm_management_uninstall() {
@@ -351,6 +361,11 @@ vm_management_uninstall() {
 
   vm_management_load_installed_state ||
     vm_die 69 'Installed configuration is unavailable'
+  [[ $REMOTE_CHROME_INSTALL_ROOT == "$REMOTE_CHROME_TRUSTED_INSTALL_ROOT" &&
+     $REMOTE_CHROME_CONFIG_ROOT == "$REMOTE_CHROME_TRUSTED_CONFIG_ROOT" &&
+     $REMOTE_CHROME_SYSTEMD_ROOT == "$REMOTE_CHROME_TRUSTED_SYSTEMD_ROOT" &&
+     $REMOTE_CHROME_CLI_ROOT == "$REMOTE_CHROME_TRUSTED_CLI_ROOT" ]] ||
+    vm_die 64 'Installed management roots are untrusted'
   local data_root=$REMOTE_CHROME_DATA_DIR
   local profile="$data_root/profile" backups="$data_root/backups"
   local unit="$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome.service"
@@ -358,11 +373,13 @@ vm_management_uninstall() {
   vm_management_validate_data_root "$data_root" ||
     vm_die 64 'Configured data root is unsafe'
   vm_management_validate_delete_target \
-    "$REMOTE_CHROME_INSTALL_ROOT" "$REMOTE_CHROME_INSTALL_ROOT" ||
+    "$REMOTE_CHROME_INSTALL_ROOT" "$REMOTE_CHROME_TRUSTED_INSTALL_ROOT" ||
     vm_die 64 'Install root is unsafe'
-  vm_management_validate_delete_target "$unit" "$unit" ||
+  vm_management_validate_delete_target \
+    "$unit" "$REMOTE_CHROME_TRUSTED_SYSTEMD_ROOT/remote-chrome.service" ||
     vm_die 64 'Service unit path is unsafe'
-  vm_management_validate_delete_target "$cli" "$cli" ||
+  vm_management_validate_delete_target \
+    "$cli" "$REMOTE_CHROME_TRUSTED_CLI_ROOT/remote-chrome" ||
     vm_die 64 'Management CLI path is unsafe'
   if ((delete_profile == 1)); then
     vm_management_validate_delete_target "$profile" "$data_root/profile" ||
@@ -376,26 +393,43 @@ vm_management_uninstall() {
     vm_management_validate_delete_target "$data_root" "$data_root" ||
       vm_die 64 'Managed data path is unsafe'
     vm_management_validate_delete_target \
-      "$REMOTE_CHROME_CONFIG_ROOT" "$REMOTE_CHROME_CONFIG_ROOT" ||
+      "$REMOTE_CHROME_CONFIG_ROOT" "$REMOTE_CHROME_TRUSTED_CONFIG_ROOT" ||
       vm_die 64 'Managed configuration path is unsafe'
     if ((force == 0)); then
-      local tty=${REMOTE_CHROME_TTY:-/dev/tty} confirmation=
+      local tty confirmation=
+      tty=$(vm_management_confirmation_tty) || return 1
       if [[ -n ${REMOTE_CHROME_TEST_ROOT:-} ]]; then
         vm_require_management_destination "$tty" ||
           vm_die 64 'Confirmation TTY is unsafe'
+      else
+        [[ $tty == /dev/tty && -c $tty ]] ||
+          vm_die 64 'Confirmation requires the real /dev/tty'
       fi
-      printf 'Type %s to delete all Remote Chrome data: ' "$DOMAIN" >>"$tty" ||
-        return 1
-      IFS= read -r confirmation <"$tty" || return 1
+      if [[ -n ${REMOTE_CHROME_CANONICAL_TEST_ROOT:-} ]]; then
+        printf 'Type %s to delete all Remote Chrome data: ' "$DOMAIN" \
+          >>"$tty" || return 1
+        IFS= read -r confirmation <"$tty" || return 1
+      else
+        local tty_fd
+        exec {tty_fd}<>"$tty" || return 1
+        [[ -t $tty_fd ]] || {
+          exec {tty_fd}>&-
+          vm_die 64 'Confirmation requires an interactive /dev/tty'
+        }
+        printf 'Type %s to delete all Remote Chrome data: ' "$DOMAIN" \
+          >&"$tty_fd" || return 1
+        IFS= read -r confirmation <&"$tty_fd" || return 1
+        exec {tty_fd}>&-
+      fi
       [[ $confirmation == "$DOMAIN" ]] ||
         vm_die 64 'Domain confirmation did not match'
     fi
   fi
 
-  systemctl stop remote-chrome.service
-  systemctl disable remote-chrome.service
+  vm_run_bounded systemctl stop remote-chrome.service
+  vm_run_bounded systemctl disable remote-chrome.service
   rm -f -- "$unit"
-  systemctl daemon-reload
+  vm_run_bounded systemctl daemon-reload
   rm -f -- "$cli"
   rm -rf -- "$REMOTE_CHROME_INSTALL_ROOT"
   ((delete_profile == 0)) || rm -rf -- "$profile"

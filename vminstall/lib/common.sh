@@ -55,10 +55,10 @@ vm_init_paths() {
   else
     [[ ${REMOTE_CHROME_DRY_RUN:-0} != 1 ]] ||
       vm_die 64 'Dry-run requires REMOTE_CHROME_TEST_ROOT'
-    REMOTE_CHROME_INSTALL_ROOT=${REMOTE_CHROME_INSTALL_ROOT:-/opt/remotechromemcp}
-    REMOTE_CHROME_CONFIG_ROOT=${REMOTE_CHROME_CONFIG_ROOT:-/etc/remote-chrome}
-    REMOTE_CHROME_SYSTEMD_ROOT=${REMOTE_CHROME_SYSTEMD_ROOT:-/etc/systemd/system}
-    REMOTE_CHROME_CLI_ROOT=${REMOTE_CHROME_CLI_ROOT:-/usr/local/sbin}
+    REMOTE_CHROME_INSTALL_ROOT=/opt/remotechromemcp
+    REMOTE_CHROME_CONFIG_ROOT=/etc/remote-chrome
+    REMOTE_CHROME_SYSTEMD_ROOT=/etc/systemd/system
+    REMOTE_CHROME_CLI_ROOT=/usr/local/sbin
   fi
 }
 

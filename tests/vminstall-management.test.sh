@@ -121,6 +121,7 @@ apply_patch_fake "$fake_bin/timeout" \
   'exec "$@"'
 
 apply_patch_fake "$fake_bin/docker" \
+  'if [[ ${REMOTE_CHROME_FAKE_DOCKER_HANG:-0} == 1 ]]; then exec /bin/sleep 30; fi' \
   'printf "docker" >>"$FAKE_COMMAND_LOG"' \
   'printf " <%s>" "$@" >>"$FAKE_COMMAND_LOG"' \
   'printf "\n" >>"$FAKE_COMMAND_LOG"' \
@@ -153,6 +154,7 @@ apply_patch_fake "$fake_bin/docker" \
   'fi'
 
 apply_patch_fake "$fake_bin/systemctl" \
+  'if [[ ${REMOTE_CHROME_FAKE_SYSTEMCTL_HANG:-0} == 1 ]]; then exec /bin/sleep 30; fi' \
   'printf "systemctl" >>"$FAKE_COMMAND_LOG"' \
   'printf " <%s>" "$@" >>"$FAKE_COMMAND_LOG"' \
   'printf "\n" >>"$FAKE_COMMAND_LOG"' \
@@ -178,6 +180,7 @@ apply_patch_fake "$fake_bin/chown" \
   'printf "\n" >>"$FAKE_COMMAND_LOG"'
 
 apply_patch_fake "$fake_bin/curl" \
+  'if [[ ${REMOTE_CHROME_FAKE_CURL_HANG:-0} == 1 ]]; then exec /bin/sleep 30; fi' \
   'printf "curl" >>"$FAKE_COMMAND_LOG"' \
   'printf " <%s>" "$@" >>"$FAKE_COMMAND_LOG"' \
   'printf "\n" >>"$FAKE_COMMAND_LOG"' \
@@ -207,10 +210,17 @@ apply_patch_fake "$fake_bin/curl" \
   'status=500; event=invalid' \
   'case "$method:$url" in' \
   '  POST:https://chrome.example.com/mcp)' \
-  '    [[ $auth == "$bearer" && $data == *'\''"method":"initialize"'\''* ]] || exit 91' \
-  '    status=200; event=initialize' \
-  '    printf "HTTP/2 200\r\nContent-Type: application/json\r\nMcp-Session-Id: fixture-session\r\n\r\n" >"$headers"' \
-  '    printf "%s" '\''{"result":{"instructions":"Remote Browser Interaction Playbook"}}'\'' >"$output"' \
+  '    [[ $data == *'\''"method":"initialize"'\''* ]] || exit 91' \
+  '    if [[ -z $auth ]]; then' \
+  '      status=401; event=anonymous-401' \
+  '      printf "HTTP/2 401\r\nContent-Type: application/json\r\n\r\n" >"$headers"' \
+  '      printf "%s" '\''{"error":"unauthorized"}'\'' >"$output"' \
+  '    else' \
+  '      [[ $auth == "$bearer" ]] || exit 91' \
+  '      status=200; event=initialize' \
+  '      printf "HTTP/2 200\r\nContent-Type: application/json\r\nMcp-Session-Id: fixture-session\r\n\r\n" >"$headers"' \
+  '      printf "%s" '\''{"result":{"instructions":"Remote Browser Interaction Playbook"}}'\'' >"$output"' \
+  '    fi' \
   '    ;;' \
   '  DELETE:https://chrome.example.com/mcp)' \
   '    [[ $auth == "$bearer" && $session == fixture-session ]] || exit 92' \
@@ -247,6 +257,14 @@ apply_patch_fake "$fake_bin/curl" \
   'esac' \
   'printf "%s\n" "$event" >>"$REMOTE_CHROME_PROTOCOL_LOG"' \
   'printf "%s" "$status"'
+
+apply_patch_fake "$fake_bin/du" \
+  'if [[ ${REMOTE_CHROME_FAKE_DU_HANG:-0} == 1 ]]; then exec /bin/sleep 30; fi' \
+  'exec /usr/bin/du "$@"'
+
+apply_patch_fake "$fake_bin/find" \
+  'if [[ ${REMOTE_CHROME_FAKE_FIND_HANG:-0} == 1 ]]; then exec /bin/sleep 30; fi' \
+  'exec /usr/bin/find "$@"'
 
 export PATH="$fake_bin:$PATH"
 export REMOTE_CHROME_SKIP_MAIN=1
@@ -511,6 +529,8 @@ vm_activate_release >"$success_root/stdout" 2>"$success_root/stderr"
   fail 'current must switch to the candidate only after Compose config succeeds'
 [[ $(<"$REMOTE_CHROME_CONFIG_ROOT/active-version") == v2.0.0 ]] ||
   fail 'active version must be recorded after all verification succeeds'
+[[ $(<"$REMOTE_CHROME_CONFIG_ROOT/previous-version") == v1.0.0 ]] ||
+  fail 'successful activation must atomically record the actual previous current release'
 for installed in install.env compose.env credentials.env; do
   assert_file_mode_owner "$REMOTE_CHROME_CONFIG_ROOT/$installed"
 done
@@ -528,13 +548,14 @@ grep -Fq ' <ps> ' "$fake_log" ||
   fail 'the installed ExecStartPost wait-ready target must execute successfully'
 [[ $(stat -c '%a' "$REMOTE_CHROME_CONFIG_ROOT/activation-diagnostic.log") == 600 ]] ||
   fail 'Compose diagnostics must be retained only in a root-only mode-600 file'
-[[ $(<"$REMOTE_CHROME_PROTOCOL_LOG") == $'initialize\ndelete\nget-405\nlogin-401\nlogin-200\nwebsocket-101' ]] ||
+[[ $(<"$REMOTE_CHROME_PROTOCOL_LOG") == $'anonymous-401\ninitialize\ndelete\nget-405\nlogin-401\nlogin-200\nwebsocket-101' ]] ||
   fail 'public verification must perform the complete strict protocol in order'
 grep -Fq ' <--http1.1> <--max-time> <3>' "$fake_log" ||
   fail 'WebSocket verification must use a bounded three-second request'
 grep -Fxq \
-  'timeout <5> <openssl> <s_client> <-connect> <chrome.example.com:443> <-servername> <chrome.example.com> <-verify_return_error>' \
-  "$fake_log" ||
+  'openssl <s_client> <-connect> <chrome.example.com:443> <-servername> <chrome.example.com> <-verify_return_error>' \
+  "$fake_log" &&
+  grep -Fxq 'openssl <x509> <-noout> <-issuer> <-enddate>' "$fake_log" ||
   fail 'certificate metadata probe must be bounded and validate domain SNI'
 certificate_state="$REMOTE_CHROME_CONFIG_ROOT/certificate.env"
 [[ -f $certificate_state && $(stat -c '%a' "$certificate_state") == 600 ]] ||
@@ -888,7 +909,7 @@ run_cli() {
   REMOTE_CHROME_EXPECT_PASSWORD=$(
     read_env_value "$root/etc/remote-chrome/credentials.env" LOGIN_PASSWORD
   ) \
-    bash vminstall/remote-chrome "$@"
+    "$root/usr/local/sbin/remote-chrome" "$@"
 }
 
 make_update_archive() {
@@ -921,6 +942,37 @@ setup_activation_fixture "$cli_root"
 touch "$REMOTE_CHROME_DATA_DIR/profile/session-marker"
 printf '%s\n' '{"version":"fixture-backup"}' \
   >"$REMOTE_CHROME_DATA_DIR/backups/20260727T120000Z.manifest"
+
+# The executable location, never caller-controlled roots, selects installed
+# libraries. A malicious environment root must remain completely unsourced.
+malicious_root="$test_root/malicious-source-root"
+mkdir -p "$malicious_root/opt/remotechromemcp/current/vminstall/lib"
+for library in common wizard config release activate management; do
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf 'printf "sourced %s\\n" >>%q\n' "$library" \
+      "$malicious_root/source-canary"
+  } >"$malicious_root/opt/remotechromemcp/current/vminstall/lib/$library.sh"
+done
+REMOTE_CHROME_TEST_ROOT="$malicious_root" \
+REMOTE_CHROME_INSTALL_ROOT="$malicious_root/opt/remotechromemcp" \
+REMOTE_CHROME_CONFIG_ROOT="$malicious_root/etc/remote-chrome" \
+REMOTE_CHROME_SYSTEMD_ROOT="$malicious_root/etc/systemd/system" \
+REMOTE_CHROME_CLI_ROOT="$malicious_root/usr/local/sbin" \
+REMOTE_CHROME_TEST_EUID=0 \
+REMOTE_CHROME_FAKE_SYSTEMD_STATE="$cli_root/systemd-state" \
+REMOTE_CHROME_PROTOCOL_LOG="$cli_root/protocol.log" \
+REMOTE_CHROME_EXPECT_TOKEN="$REMOTE_CHROME_EXPECT_TOKEN" \
+REMOTE_CHROME_EXPECT_USERNAME="$REMOTE_CHROME_EXPECT_USERNAME" \
+REMOTE_CHROME_EXPECT_PASSWORD="$REMOTE_CHROME_EXPECT_PASSWORD" \
+  "$cli_root/usr/local/sbin/remote-chrome" login \
+    >"$cli_root/source-boundary.stdout" \
+    2>"$cli_root/source-boundary.stderr"
+[[ ! -e $malicious_root/source-canary ]] ||
+  fail 'installed CLI must ignore environment-selected source roots before sourcing'
+grep -Fxq 'Login URL: https://chrome.example.com/login/' \
+  "$cli_root/source-boundary.stdout" ||
+  fail 'installed CLI must source libraries beneath its own trusted prefix'
 
 set +e
 run_cli "$cli_root" >"$cli_root/no-args.stdout" \
@@ -1018,7 +1070,7 @@ grep -Fxq 'Login username: remotechrome' "$cli_root/login.stdout" ||
 run_cli "$cli_root" wait-ready >"$cli_root/wait-ready.stdout" \
   2>"$cli_root/wait-ready.stderr"
 [[ $(<"$REMOTE_CHROME_PROTOCOL_LOG") == \
-  $'initialize\ndelete\nget-405\nlogin-401\nlogin-200\nwebsocket-101' ]] ||
+  $'anonymous-401\ninitialize\ndelete\nget-405\nlogin-401\nlogin-200\nwebsocket-101' ]] ||
   fail 'wait-ready must require MCP, Basic login, and WebSocket readiness'
 [[ ! -s $cli_root/wait-ready.stdout ]] ||
   fail 'wait-ready must remain quiet on success'
@@ -1061,9 +1113,19 @@ REMOTE_CHROME_RELEASE_ARCHIVE="$update_archive" \
   run_cli "$cli_root" update --version v1.0.1 \
   >"$cli_root/update.stdout" 2>"$cli_root/update.stderr"
 [[ $(<"$cli_root/etc/remote-chrome/active-version") == v1.0.1 &&
+   $(<"$cli_root/etc/remote-chrome/previous-version") == v1.0.0 &&
    $(readlink "$cli_root/opt/remotechromemcp/current") == \
      releases/v1.0.1 ]] ||
   fail 'verified pinned update must activate the requested release'
+
+# Retained release names are deliberately unrelated to activation history.
+# Status must use protected state, never a lexicographic directory guess.
+make_release "$cli_root" v99.0.0
+: >"$REMOTE_CHROME_PROTOCOL_LOG"
+run_cli "$cli_root" status >"$cli_root/status-history.stdout" \
+  2>"$cli_root/status-history.stderr"
+grep -Fxq 'Prior release: v1.0.0' "$cli_root/status-history.stdout" ||
+  fail 'status must report the actual previous release with three retained releases'
 
 rollback_archive=$(make_update_archive "$cli_root" v1.0.2)
 set +e
@@ -1076,6 +1138,7 @@ update_rollback_status=$?
 set -e
 [[ $update_rollback_status -ne 0 &&
    $(<"$cli_root/etc/remote-chrome/active-version") == v1.0.1 &&
+   $(<"$cli_root/etc/remote-chrome/previous-version") == v1.0.0 &&
    $(readlink "$cli_root/opt/remotechromemcp/current") == \
      releases/v1.0.1 &&
    ! -e $cli_root/opt/remotechromemcp/releases/v1.0.2 ]] ||
@@ -1151,6 +1214,20 @@ REMOTE_CHROME_TTY="$all_data_uninstall_root/confirmation.tty" \
    ! -e $all_data_uninstall_root/etc/remote-chrome ]] ||
   fail '--delete-all-data must delete exact configured data and config roots'
 
+# A production-mode confirmation source is always /dev/tty. Merely exporting
+# an ordinary file must never relocate the destructive confirmation boundary.
+production_confirmation_file="$test_root/production-confirmation.txt"
+printf 'chrome.example.com\n' >"$production_confirmation_file"
+production_confirmation_path=$(
+  # shellcheck source=../vminstall/lib/management.sh
+  source vminstall/lib/management.sh
+  unset REMOTE_CHROME_TEST_ROOT REMOTE_CHROME_CANONICAL_TEST_ROOT
+  REMOTE_CHROME_TTY="$production_confirmation_file"
+  vm_management_confirmation_tty
+)
+[[ $production_confirmation_path == /dev/tty ]] ||
+  fail 'production destructive confirmation must ignore regular-file overrides'
+
 wrong_confirmation_root="$test_root/uninstall-wrong-confirmation"
 setup_uninstall_fixture "$wrong_confirmation_root"
 printf 'wrong.example.com\n' >"$wrong_confirmation_root/confirmation.tty"
@@ -1216,5 +1293,47 @@ invalid_test_root_status=$?
 set -e
 [[ $invalid_test_root_status -ne 0 ]] ||
   fail 'CLI must reject a root REMOTE_CHROME_TEST_ROOT'
+
+# Each potentially blocking status/readiness boundary must lose to the CLI's
+# own deadline, not this outer test watchdog.
+for hanging_probe in SYSTEMCTL DOCKER CURL DU FIND; do
+  set +e
+  env \
+    "REMOTE_CHROME_FAKE_${hanging_probe}_HANG=1" \
+    REMOTE_CHROME_COMMAND_TIMEOUT=1 \
+    REMOTE_CHROME_HEALTH_ATTEMPTS=1 \
+    REMOTE_CHROME_TEST_EUID=0 \
+    REMOTE_CHROME_FAKE_SYSTEMD_STATE="$cli_root/systemd-state" \
+    REMOTE_CHROME_PROTOCOL_LOG="$cli_root/protocol.log" \
+    REMOTE_CHROME_EXPECT_TOKEN="$cli_token" \
+    REMOTE_CHROME_EXPECT_USERNAME=remotechrome \
+    REMOTE_CHROME_EXPECT_PASSWORD="$cli_password" \
+    /usr/bin/timeout 12 "$cli_root/usr/local/sbin/remote-chrome" status \
+      >"$cli_root/hang-$hanging_probe.stdout" \
+      2>"$cli_root/hang-$hanging_probe.stderr"
+  hanging_status=$?
+  set -e
+  [[ $hanging_status -ne 124 && $hanging_status -ne 137 ]] ||
+    fail "$hanging_probe probe must terminate within the CLI deadline"
+done
+
+for invalid_health_bounds in \
+  'REMOTE_CHROME_HEALTH_ATTEMPTS=0' \
+  'REMOTE_CHROME_HEALTH_ATTEMPTS=999' \
+  'REMOTE_CHROME_HEALTH_DELAY=not-a-number' \
+  'REMOTE_CHROME_HEALTH_DELAY=999' \
+  'REMOTE_CHROME_COMMAND_TIMEOUT=0' \
+  'REMOTE_CHROME_COMMAND_TIMEOUT=999'; do
+  set +e
+  env "$invalid_health_bounds" \
+    REMOTE_CHROME_TEST_EUID=0 \
+    "$cli_root/usr/local/sbin/remote-chrome" wait-ready \
+      >"$cli_root/invalid-bound.stdout" \
+      2>"$cli_root/invalid-bound.stderr"
+  invalid_bound_status=$?
+  set -e
+  [[ $invalid_bound_status -ne 0 ]] ||
+    fail "invalid readiness bound must be rejected: $invalid_health_bounds"
+done
 
 printf 'PASS: VM protected configuration, activation, rollback, handoff, and management CLI contracts\n'
