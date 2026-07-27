@@ -30,7 +30,7 @@ vm_install_docker() {
 
   vm_run_mutation apt-get update
   vm_run_mutation apt-get install -y \
-    ca-certificates curl gnupg openssl tar gzip coreutils
+    ca-certificates curl gnupg openssl tar gzip coreutils python3
   vm_run_mutation install -m 0755 -d "$keyring_dir"
 
   if [[ ${REMOTE_CHROME_DRY_RUN:-0} == 1 ]]; then

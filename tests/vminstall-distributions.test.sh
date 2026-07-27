@@ -112,7 +112,8 @@ REMOTE_CHROME_SKIP_MAIN=1
 source vminstall/installer-main.sh
 
 missing=()
-for function_name in vm_check_host vm_install_docker; do
+for function_name in \
+  vm_ensure_profile_exchange_runtime vm_check_host vm_install_docker; do
   declare -F "$function_name" >/dev/null || missing+=("$function_name")
 done
 ((${#missing[@]} == 0)) ||
@@ -186,7 +187,7 @@ for matrix_row in \
   [[ $(sed -n '3p' "$command_log") == 'apt-get <update>' ]] ||
     fail "$fixture must update apt before installing prerequisites"
   [[ $(sed -n '4p' "$command_log") == \
-     'apt-get <install> <-y> <ca-certificates> <curl> <gnupg> <openssl> <tar> <gzip> <coreutils>' ]] ||
+     'apt-get <install> <-y> <ca-certificates> <curl> <gnupg> <openssl> <tar> <gzip> <coreutils> <python3>' ]] ||
     fail "$fixture must install the complete prerequisite package set"
   [[ $(sed -n '12p' "$command_log") == 'apt-get <update>' ]] ||
     fail "$fixture must update apt after installing the Docker repository"
@@ -197,6 +198,45 @@ for matrix_row in \
      'docker <compose> <version>' ]] ||
     fail "$fixture must verify the Compose plugin last"
 done
+
+python_runtime_root="$test_root/python-runtime"
+mkdir "$python_runtime_root"
+set_command_log_root "$python_runtime_root"
+reset_fakes
+REMOTE_CHROME_DRY_RUN=1
+REMOTE_CHROME_TEST_ROOT="$python_runtime_root"
+export REMOTE_CHROME_TEST_EUID=0
+vm_init_paths
+vm_ensure_profile_exchange_runtime
+grep -Fxq 'apt-get <update>' "$command_log" &&
+  grep -Fxq 'apt-get <install> <-y> <python3>' "$command_log" ||
+  fail 'missing profile-exchange runtime must be installed explicitly'
+[[ -f $python_runtime_root/usr/bin/python3 &&
+   ! -L $python_runtime_root/usr/bin/python3 &&
+   -x $python_runtime_root/usr/bin/python3 ]] ||
+  fail 'dry-run profile-exchange runtime must be fixture-confined and executable'
+
+: >"$command_log"
+vm_ensure_profile_exchange_runtime
+[[ ! -s $command_log ]] ||
+  fail 'existing trusted profile-exchange runtime must not reinstall'
+
+nonroot_runtime_root="$test_root/python-runtime-nonroot"
+mkdir "$nonroot_runtime_root"
+set_command_log_root "$nonroot_runtime_root"
+reset_fakes
+REMOTE_CHROME_DRY_RUN=1
+REMOTE_CHROME_TEST_ROOT="$nonroot_runtime_root"
+vm_init_paths
+set +e
+(REMOTE_CHROME_TEST_EUID=1000 vm_ensure_profile_exchange_runtime) \
+  >"$nonroot_runtime_root/stdout" 2>"$nonroot_runtime_root/stderr"
+nonroot_runtime_status=$?
+set -e
+[[ $nonroot_runtime_status -eq 77 ]] ||
+  fail 'profile-exchange runtime installation must require root first'
+[[ ! -s $command_log ]] ||
+  fail 'profile-exchange runtime must not mutate before root validation'
 
 arch_root="$test_root/unsupported-arch"
 mkdir "$arch_root"

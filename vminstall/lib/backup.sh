@@ -63,6 +63,33 @@ vm_backup_trusted_tool() {
   printf '%s' "$command"
 }
 
+vm_backup_exchange_profiles() {
+  local current=$1 rollback=$2 python script
+  python=$(vm_trusted_python3) || return $?
+  script='import ctypes
+import os
+import sys
+
+libc = ctypes.CDLL(None, use_errno=True)
+renameat2 = libc.renameat2
+renameat2.argtypes = [
+    ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p,
+    ctypes.c_uint,
+]
+renameat2.restype = ctypes.c_int
+at_fdcwd = -100
+rename_exchange = 2
+result = renameat2(
+    at_fdcwd, os.fsencode(sys.argv[1]),
+    at_fdcwd, os.fsencode(sys.argv[2]),
+    rename_exchange,
+)
+if result != 0:
+    error = ctypes.get_errno()
+    raise OSError(error, os.strerror(error))'
+  vm_run_bounded "$python" -I -S -c "$script" "$current" "$rollback"
+}
+
 vm_backup_gcloud_cp() {
   local source=$1 destination=$2 command
   command=$(vm_backup_gcloud_path) || return $?
@@ -392,33 +419,17 @@ vm_restore_profile_locked() (
         vm_backup_health health || true
         exit 70
       fi
-      if [[ -e $REMOTE_CHROME_DATA_DIR/profile ||
-            -L $REMOTE_CHROME_DATA_DIR/profile ]]; then
-        if ! mv -- "$REMOTE_CHROME_DATA_DIR/profile" "$failed"; then
-          vm_backup_start_browser "$release" || true
-          vm_backup_health health || true
-          report_restore_recovery
-          exit 70
-        fi
+      if [[ ! -d $REMOTE_CHROME_DATA_DIR/profile ||
+            -L $REMOTE_CHROME_DATA_DIR/profile ||
+            ! -d $rollback || -L $rollback ]] ||
+         ! vm_backup_exchange_profiles \
+           "$REMOTE_CHROME_DATA_DIR/profile" "$rollback"; then
+        vm_backup_start_browser "$release" || true
+        vm_backup_health health || true
+        report_restore_recovery
+        exit 70
       fi
-      if [[ -d $rollback && ! -L $rollback ]]; then
-        if ! mv -- "$rollback" "$REMOTE_CHROME_DATA_DIR/profile"; then
-          if [[ ! -e $REMOTE_CHROME_DATA_DIR/profile &&
-                ! -L $REMOTE_CHROME_DATA_DIR/profile &&
-                -d $failed && ! -L $failed ]]; then
-            mv -- "$failed" "$REMOTE_CHROME_DATA_DIR/profile" || true
-          fi
-          vm_backup_start_browser "$release" || true
-          vm_backup_health health || true
-          report_restore_recovery
-          exit 70
-        fi
-      else
-        if [[ ! -e $REMOTE_CHROME_DATA_DIR/profile &&
-              ! -L $REMOTE_CHROME_DATA_DIR/profile &&
-              -d $failed && ! -L $failed ]]; then
-          mv -- "$failed" "$REMOTE_CHROME_DATA_DIR/profile" || true
-        fi
+      if ! mv -- "$rollback" "$failed"; then
         vm_backup_start_browser "$release" || true
         vm_backup_health health || true
         report_restore_recovery

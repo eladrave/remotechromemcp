@@ -41,6 +41,20 @@ vm_require_root() {
     vm_die 77 'Run the installer as root, for example with sudo sh'
 }
 
+vm_trusted_python3() {
+  local command=/usr/bin/python3 resolved prefix=/usr/bin
+  if [[ -n ${REMOTE_CHROME_CANONICAL_TEST_ROOT:-} ]]; then
+    prefix="$REMOTE_CHROME_CANONICAL_TEST_ROOT/usr/bin"
+    command="$prefix/python3"
+  fi
+  [[ -e $command && -x $command ]] || return 69
+  resolved=$(/usr/bin/readlink -f -- "$command") || return 69
+  [[ $resolved == "$prefix/python3" ||
+     $resolved == "$prefix/python3."* ]] || return 69
+  [[ -f $resolved && ! -L $resolved && -x $resolved ]] || return 69
+  printf '%s' "$resolved"
+}
+
 vm_init_paths() {
   local prefix=
   if [[ -n ${REMOTE_CHROME_TEST_ROOT:-} ]]; then

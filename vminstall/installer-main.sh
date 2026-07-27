@@ -32,6 +32,7 @@ vm_installer_main() {
     vm_die 69 'DNS verification failed'
   vm_check_public_ports ||
     vm_die 69 'Ports 80 and 443 must be available'
+  vm_ensure_profile_exchange_runtime
   vm_install_docker
   [[ -n ${REMOTE_CHROME_RELEASE_ARCHIVE:-} ]] ||
     vm_die 66 'REMOTE_CHROME_RELEASE_ARCHIVE is required for release staging'

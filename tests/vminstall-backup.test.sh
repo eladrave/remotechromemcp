@@ -27,6 +27,7 @@ required_tests=(
   restore_unconfirmed_rollback_stop_preserves_all
   restore_candidate_profile_rename_failure_preserves_canonical
   restore_rollback_profile_rename_failure_restores_candidate
+  restore_combined_rename_failure_keeps_canonical_profile
   restore_rollback_restart_failure_preserves_recovery
   restore_rollback_health_failure_preserves_recovery
   restore_cleanup_failure_keeps_healthy_profile_and_rollback
@@ -111,6 +112,13 @@ set -euo pipefail
 printf 'a1b2c3d4e5f6\n'
 FAKE
 
+cat >"$fake_bin/python3" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ ${FAKE_RENAME_EXCHANGE_FAIL:-0} != 1 ]] || exit 84
+exec /usr/bin/python3 "$@"
+FAKE
+
 cat >"$fake_bin/systemctl" <<'FAKE'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -156,7 +164,8 @@ printf 'mv <%s>\n' "$*" >>"$FAKE_COMMAND_LOG"
 source_path=${@: -2:1}
 destination=${@: -1}
 if [[ ${FAKE_MV_FAIL_CANDIDATE_TO_FAILED:-0} == 1 &&
-      $source_path == "$REMOTE_CHROME_DATA_DIR/profile" &&
+      ( $source_path == "$REMOTE_CHROME_DATA_DIR/profile" ||
+        $source_path == "$REMOTE_CHROME_DATA_DIR/profile.rollback-"* ) &&
       $destination == "$REMOTE_CHROME_DATA_DIR/profile.failed-"* ]]; then
   exit 81
 fi
@@ -164,6 +173,11 @@ if [[ ${FAKE_MV_FAIL_ROLLBACK_TO_PROFILE:-0} == 1 &&
       $source_path == "$REMOTE_CHROME_DATA_DIR/profile.rollback-"* &&
       $destination == "$REMOTE_CHROME_DATA_DIR/profile" ]]; then
   exit 82
+fi
+if [[ ${FAKE_MV_FAIL_FAILED_TO_PROFILE:-0} == 1 &&
+      $source_path == "$REMOTE_CHROME_DATA_DIR/profile.failed-"* &&
+      $destination == "$REMOTE_CHROME_DATA_DIR/profile" ]]; then
+  exit 83
 fi
 exec /usr/bin/mv "$@"
 FAKE
@@ -225,7 +239,7 @@ setup_fixture() {
   cp vminstall/compose.vm.yaml \
     "$fixture_root/opt/remotechromemcp/releases/v1.0.0/vminstall/compose.vm.yaml"
   cp "$fake_bin/tar" "$fake_bin/sha256sum" "$fake_bin/openssl" \
-    "$fake_bin/chown" "$fixture_root/usr/bin/"
+    "$fake_bin/chown" "$fake_bin/python3" "$fixture_root/usr/bin/"
   printf 'old-profile\n' \
     >"$fixture_root/var/lib/remote-chrome/profile/current-marker"
   chmod 0700 "$fixture_root/var/lib/remote-chrome/profile"
@@ -305,7 +319,8 @@ FAKE
   unset FAKE_GCLOUD_FAIL_UPLOAD FAKE_HEALTH_FAIL_ON KEEP_LOCAL_BACKUPS
   unset FAKE_PS_FAIL_ON FAKE_PS_HANG_ON FAKE_RM_FAIL_RESTORE
   unset FAKE_START_FAIL_ON FAKE_MV_FAIL_CANDIDATE_TO_FAILED
-  unset FAKE_MV_FAIL_ROLLBACK_TO_PROFILE FAKE_SYSTEMCTL_DISABLE_FAIL
+  unset FAKE_MV_FAIL_ROLLBACK_TO_PROFILE FAKE_MV_FAIL_FAILED_TO_PROFILE
+  unset FAKE_RENAME_EXCHANGE_FAIL FAKE_SYSTEMCTL_DISABLE_FAIL
   unset FAKE_SYSTEMCTL_DISABLE_ABSENT
   : >"$REMOTE_CHROME_BACKUP_LOG"
   : >"$FAKE_COMMAND_LOG"
@@ -562,7 +577,7 @@ assert_confirmed_stop_recovery_failure() {
     [[ -f $rollback/current-marker ]] ||
       fail 'candidate-preserving recovery failure must retain the old rollback'
   else
-    [[ -f $failed/restored-marker ]] ||
+    [[ -f $failed/restored-marker || -f $rollback/restored-marker ]] ||
       fail 'old-profile recovery failure must retain the failed candidate'
   fi
   for retained in \
@@ -581,19 +596,47 @@ restore_candidate_profile_rename_failure_preserves_canonical() {
     >"$fixture_root/restore.stdout" 2>"$fixture_root/restore.stderr"
   status=$?
   set -e
-  assert_confirmed_stop_recovery_failure restored-marker
+  assert_confirmed_stop_recovery_failure current-marker
 }
 
 restore_rollback_profile_rename_failure_restores_candidate() {
   setup_fixture "$FUNCNAME"; make_restore_fixture valid
   export FAKE_HEALTH_FAIL_ON=2
-  export FAKE_MV_FAIL_ROLLBACK_TO_PROFILE=1
+  export FAKE_RENAME_EXCHANGE_FAIL=1
   set +e
   vm_restore_profile "$RESTORE_MANIFEST_URI" \
     >"$fixture_root/restore.stdout" 2>"$fixture_root/restore.stderr"
   status=$?
   set -e
   assert_confirmed_stop_recovery_failure restored-marker
+}
+
+restore_combined_rename_failure_keeps_canonical_profile() {
+  setup_fixture "$FUNCNAME"; make_restore_fixture valid
+  export FAKE_HEALTH_FAIL_ON=2
+  export FAKE_RENAME_EXCHANGE_FAIL=1
+  export FAKE_MV_FAIL_ROLLBACK_TO_PROFILE=1
+  export FAKE_MV_FAIL_FAILED_TO_PROFILE=1
+  set +e
+  vm_restore_profile "$RESTORE_MANIFEST_URI" \
+    >"$fixture_root/restore.stdout" 2>"$fixture_root/restore.stderr"
+  status=$?
+  set -e
+  rollback=$(find "$REMOTE_CHROME_DATA_DIR" -maxdepth 1 \
+    -type d -name 'profile.rollback-*' -print -quit)
+  failed=${rollback/profile.rollback-/profile.failed-}
+  staging=$(find "$REMOTE_CHROME_DATA_DIR/restore-staging" -mindepth 1 \
+    -maxdepth 1 -type d -print -quit)
+  [[ $status -eq 70 &&
+     -d $REMOTE_CHROME_DATA_DIR/profile &&
+     ! -L $REMOTE_CHROME_DATA_DIR/profile &&
+     -n $rollback && -n $staging ]] ||
+    fail 'combined rollback rename failures must retain a real canonical profile and recovery paths with status 70'
+  for retained in \
+      "$REMOTE_CHROME_DATA_DIR/profile" "$failed" "$rollback" "$staging"; do
+    grep -Fq -- "$retained" "$fixture_root/restore.stderr" ||
+      fail "combined rollback rename failure must report exact path: $retained"
+  done
 }
 
 restore_rollback_restart_failure_preserves_recovery() {

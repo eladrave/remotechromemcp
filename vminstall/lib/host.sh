@@ -24,10 +24,31 @@ vm_validate_platform() {
      $OS_ID == debian && $OS_VERSION == 12 ]]
 }
 
+vm_ensure_profile_exchange_runtime() {
+  local python
+  vm_require_root
+  if python=$(vm_trusted_python3); then
+    return 0
+  fi
+  vm_run_mutation apt-get update
+  vm_run_mutation apt-get install -y python3
+  if [[ ${REMOTE_CHROME_DRY_RUN:-0} == 1 ]]; then
+    python="$REMOTE_CHROME_CANONICAL_TEST_ROOT/usr/bin/python3"
+    vm_require_confined_destination "$python" || return 1
+    mkdir -p -- "${python%/*}" || return 1
+    printf '%s\n' '#!/usr/bin/env bash' 'exec /usr/bin/python3 "$@"' \
+      >"$python" || return 1
+    chmod 0755 "$python" || return 1
+  fi
+  vm_trusted_python3 >/dev/null ||
+    vm_die 69 'Python 3 runtime for atomic profile exchange is unavailable'
+}
+
 vm_check_host() {
   local required
   vm_require_root
-  for required in getent curl ss tar sha256sum timeout; do
+  for required in \
+    getent curl ss tar sha256sum timeout readlink apt-get; do
     command -v "$required" >/dev/null 2>&1 ||
       vm_die 69 "Required host command is unavailable: $required"
   done
