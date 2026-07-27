@@ -61,6 +61,25 @@ validate_staging_directory() {
   [[ $(/usr/bin/stat -c '%d' -- "$candidate") == "$expected_device" ]]
 }
 
+package_residue_is_disposable() {
+  local entry_name=$1 residue_version residue_archive residue_checksum
+  [[ $entry_name =~ ^package-(v[0-9]+\.[0-9]+\.[0-9]+)\.[A-Za-z0-9]{6}$ ]] ||
+    return 1
+  residue_version=${BASH_REMATCH[1]}
+  residue_archive="$dist_dir/remotechromemcp-${residue_version}.tar.gz"
+  residue_checksum="${residue_archive}.sha256"
+  if [[ ! -e $residue_archive && ! -L $residue_archive &&
+        ! -e $residue_checksum && ! -L $residue_checksum ]]; then
+    return 0
+  fi
+  [[ -f $residue_archive && ! -L $residue_archive &&
+     -f $residue_checksum && ! -L $residue_checksum ]] || return 1
+  (
+    cd "$dist_dir"
+    sha256sum -c "${residue_checksum##*/}"
+  ) >/dev/null
+}
+
 recover_staging_root() {
   local repo_device entry entry_name entry_metadata metadata_output
   repo_device=$(/usr/bin/stat -c '%d' -- "$repo_dir") || return 1
@@ -79,16 +98,22 @@ recover_staging_root() {
   shopt -u nullglob dotglob
   for entry in "${entries[@]}"; do
     entry_name=${entry##*/}
-    [[ $entry_name =~ ^package-v[0-9]+\.[0-9]+\.[0-9]+\.[A-Za-z0-9]{6}$ ]] ||
-      {
-        printf 'Unexpected release staging entry requires review: %s\n' \
-          "$entry" >&2
-        return 1
-      }
+    if [[ ! $entry_name =~ ^(package|recovery)-v[0-9]+\.[0-9]+\.[0-9]+\.[A-Za-z0-9]{6}$ ]]; then
+      printf 'Unexpected release staging entry requires review: %s\n' \
+        "$entry" >&2
+      return 1
+    fi
     validate_staging_directory "$entry" "$repo_device" || {
       printf 'Release staging residue is unsafe: %s\n' "$entry" >&2
       return 1
     }
+    if [[ $entry_name == recovery-* ]]; then
+      printf 'Retained release recovery requires manual review: %s\n' \
+        "$entry" >&2
+      printf 'Do not delete this directory until dist and its recovery copy are verified.\n' \
+        >&2
+      return 1
+    fi
     if [[ -e $entry/RECOVERY_REQUIRED ||
           -L $entry/RECOVERY_REQUIRED ]]; then
       printf 'Retained release recovery requires manual review: %s\n' \
@@ -109,6 +134,13 @@ recover_staging_root() {
         return 1
       }
     done <<<"$metadata_output"
+    package_residue_is_disposable "$entry_name" || {
+      printf 'Release staging residue is required for manual recovery: %s\n' \
+        "$entry" >&2
+      printf 'The public pair is absent, incomplete, or invalid; do not delete the residue.\n' \
+        >&2
+      return 1
+    }
     /usr/bin/rm -rf --one-file-system -- "$entry" || return 1
   done
 }
@@ -126,10 +158,13 @@ else
   /usr/bin/mkdir -m 0700 -- "$dist_dir"
 fi
 stage="$(/usr/bin/mktemp -d "$staging_root/package-${version}.XXXXXX")"
-generated="$stage/generated"
-staged_dist="$stage/dist"
-stage_archive="$generated/$archive_name"
-stage_checksum="$generated/$checksum_name"
+set_stage_paths() {
+  generated="$stage/generated"
+  staged_dist="$stage/dist"
+  stage_archive="$generated/$archive_name"
+  stage_checksum="$generated/$checksum_name"
+}
+set_stage_paths
 /usr/bin/mkdir -m 0700 -- "$generated"
 retain_stage=0
 
@@ -137,12 +172,14 @@ cleanup() {
   local status=$?
   trap - EXIT HUP INT TERM
 
-  if [[ ${retain_stage:-0} == 0 &&
-        -n ${stage:-} &&
-        $stage == "$staging_root"/package-"$version".?????? &&
-        -d $stage &&
-        ! -L $stage ]]; then
-    /usr/bin/rm -rf --one-file-system -- "$stage"
+  if [[ ${retain_stage:-0} == 0 && -n ${stage:-} &&
+        -d $stage && ! -L $stage ]]; then
+    case "$stage" in
+      "$staging_root"/package-"$version".??????|\
+      "$staging_root"/recovery-"$version".??????)
+        /usr/bin/rm -rf --one-file-system -- "$stage"
+        ;;
+    esac
   fi
   exit "$status"
 }
@@ -284,10 +321,64 @@ verify_prior_dist() {
   [[ $(dist_tree_digest "$dist_dir") == "$prior_dist_digest" ]]
 }
 
+sync_staging_root() {
+  (
+    unset PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONINSPECT PYTHONUSERBASE \
+      PYTHONWARNINGS PYTHONBREAKPOINT PYTHONSAFEPATH
+    cd /
+    /usr/bin/python3 -I -S - "$staging_root" <<'PY'
+import os
+import sys
+
+flags = os.O_RDONLY
+if hasattr(os, "O_DIRECTORY"):
+    flags |= os.O_DIRECTORY
+descriptor = os.open(sys.argv[1], flags)
+try:
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+PY
+  )
+}
+
+write_recovery_marker() {
+  : >"$stage/RECOVERY_REQUIRED"
+}
+
+transition_to_recovery() {
+  local stage_suffix recovery_stage
+  stage_suffix=${stage##*.}
+  [[ $stage_suffix =~ ^[A-Za-z0-9]{6}$ ]] || return 1
+  recovery_stage="$staging_root/recovery-${version}.${stage_suffix}"
+  [[ ! -e $recovery_stage && ! -L $recovery_stage ]] || return 1
+
+  retain_stage=1
+  /usr/bin/mv -- "$stage" "$recovery_stage" || return 1
+  stage=$recovery_stage
+  set_stage_paths
+  sync_staging_root || return 1
+  if ! write_recovery_marker; then
+    printf 'WARNING: unable to write optional recovery marker; recovery name remains authoritative: %s\n' \
+      "$stage" >&2
+  fi
+}
+
+clear_verified_recovery() {
+  [[ $stage == "$staging_root"/recovery-"$version".?????? &&
+     -d $stage && ! -L $stage ]] || return 1
+  /usr/bin/rm -rf --one-file-system -- "$stage" || return 1
+  sync_staging_root || return 1
+  stage=
+  retain_stage=0
+}
+
 retain_publication_recovery() {
   retain_stage=1
-  if ! : >"$stage/RECOVERY_REQUIRED"; then
-    printf 'WARNING: unable to mark retained recovery directory\n' >&2
+  if [[ -n ${stage:-} && -d $stage && ! -L $stage ]] &&
+     ! write_recovery_marker; then
+    printf 'WARNING: unable to write optional recovery marker; recovery path remains protected by name or public-state proof\n' \
+      >&2
   fi
   printf 'Release rollback could not be confirmed: %s\n' "$version" >&2
   printf 'Recovery material retained at: %s\n' "$stage" >&2
@@ -350,9 +441,17 @@ if [[ $exchange_state == exchanged ]] && verify_published_pair; then
 fi
 
 if [[ $exchange_state == exchanged ]]; then
+  if ! transition_to_recovery; then
+    retain_publication_recovery
+    exit 1
+  fi
   if publish_dist_exchange && verify_prior_dist; then
-    printf 'Published release pair failed verification and was rolled back: %s\n' \
-      "$version" >&2
+    if clear_verified_recovery; then
+      printf 'Published release pair failed verification and was rolled back: %s\n' \
+        "$version" >&2
+      exit 1
+    fi
+    retain_publication_recovery
     exit 1
   fi
   retain_publication_recovery

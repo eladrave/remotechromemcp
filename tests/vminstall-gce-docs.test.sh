@@ -80,6 +80,10 @@ require_literal "$packager" \
   '/usr/bin/python3 -I -S - "$staged_dist" "$dist_dir"'
 require_regex "$packager" \
   'unset PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONINSPECT PYTHONUSERBASE'
+require_literal "$packager" 'transition_to_recovery'
+require_literal "$packager" 'sync_staging_root'
+require_regex "$packager" \
+  'recovery-v\[0-9\].*refuse|recovery.*manual review|Retained release recovery'
 assert_before "$packager" '/usr/bin/flock -x "$publication_lock_fd"' \
   'status --porcelain'
 
@@ -546,6 +550,8 @@ rollback_exchange_recovery=$(sed -n \
 [[ -d $rollback_exchange_recovery &&
    -f $rollback_exchange_recovery/RECOVERY_REQUIRED ]] ||
   fail 'rollback exchange failure must retain marked bounded recovery material'
+[[ ${rollback_exchange_recovery##*/} == recovery-v1.0.0.* ]] ||
+  fail 'rollback exchange failure must use a non-reapable recovery name'
 [[ ! -s $package_tmp/rollback-exchange-output ]] ||
   fail 'failed rollback exchange must not print success paths'
 
@@ -574,6 +580,8 @@ rollback_verify_recovery=$(sed -n \
 [[ -d $rollback_verify_recovery &&
    -f $rollback_verify_recovery/RECOVERY_REQUIRED ]] ||
   fail 'rollback verification failure must retain marked recovery material'
+[[ ${rollback_verify_recovery##*/} == recovery-v1.0.0.* ]] ||
+  fail 'rollback verification failure must use a non-reapable recovery name'
 [[ ! -s $package_tmp/rollback-verify-output ]] ||
   fail 'unconfirmed rollback verification must not print success paths'
 if "$rollback_verify_repo/scripts/package-release.sh" v1.0.0 \
@@ -585,6 +593,175 @@ grep -Fq "$rollback_verify_recovery" "$package_tmp/retained-recovery-error" ||
 [[ -d $rollback_verify_recovery &&
    -f $rollback_verify_recovery/RECOVERY_REQUIRED ]] ||
   fail 'later runs must preserve unconfirmed recovery material'
+
+marker_failure_repo="$package_tmp/marker-failure-repo"
+init_package_repo "$marker_failure_repo" v1.0.0
+inject_post_exchange_corruption "$marker_failure_repo"
+sed -i \
+  '/^write_recovery_marker() {$/a \  [[ ${FAKE_MARKER_WRITE_FAIL:-0} != 1 ]] || return 74' \
+  "$marker_failure_repo/scripts/package-release.sh"
+sed -i \
+  's|/usr/bin/python3 -I -S - "$staged_dist" "$dist_dir"|'\
+"$rollback_exchange_python"' -I -S - "$staged_dist" "$dist_dir"|' \
+  "$marker_failure_repo/scripts/package-release.sh"
+retag_package_repo "$marker_failure_repo" v1.0.0
+grep -Fq 'FAKE_MARKER_WRITE_FAIL' \
+  "$marker_failure_repo/scripts/package-release.sh" ||
+  fail 'marker-write failure was not injected'
+rm -f "$package_tmp/marker-failure-count"
+if FAKE_CORRUPT_AFTER_EXCHANGE=1 FAKE_MARKER_WRITE_FAIL=1 \
+  FAKE_EXCHANGE_COUNT="$package_tmp/marker-failure-count" \
+  "$marker_failure_repo/scripts/package-release.sh" v1.0.0 \
+  >/dev/null 2>"$package_tmp/marker-failure-error"; then
+  fail 'packager accepted rollback failure after marker-write failure'
+fi
+marker_failure_recovery=$(find "$marker_failure_repo/.release-staging" \
+  -mindepth 1 -maxdepth 1 -type d -name 'recovery-v1.0.0.*' -print -quit)
+[[ -d $marker_failure_recovery &&
+   ! -e $marker_failure_recovery/RECOVERY_REQUIRED ]] ||
+  fail 'recovery name alone must survive marker creation failure'
+if "$marker_failure_repo/scripts/package-release.sh" v1.0.0 \
+  >/dev/null 2>"$package_tmp/marker-failure-rerun-error"; then
+  fail 'next run must refuse markerless named recovery material'
+fi
+[[ -d $marker_failure_recovery ]] ||
+  fail 'next run deleted markerless named recovery material'
+grep -Fq "$marker_failure_recovery" \
+  "$package_tmp/marker-failure-rerun-error" ||
+  fail 'next run did not report markerless recovery material'
+
+rename_failure_repo="$package_tmp/recovery-rename-failure-repo"
+init_package_repo "$rename_failure_repo" v1.0.0
+inject_post_exchange_corruption "$rename_failure_repo"
+rename_failure_mv="$package_tmp/recovery-rename-failure-mv"
+cat >"$rename_failure_mv" <<'EOF'
+#!/usr/bin/env bash
+exit 75
+EOF
+chmod +x "$rename_failure_mv"
+sed -i \
+  's|/usr/bin/mv -- "$stage" "$recovery_stage"|'\
+"$rename_failure_mv"' -- "$stage" "$recovery_stage"|' \
+  "$rename_failure_repo/scripts/package-release.sh"
+retag_package_repo "$rename_failure_repo" v1.0.0
+grep -Fq "$rename_failure_mv" \
+  "$rename_failure_repo/scripts/package-release.sh" ||
+  fail 'recovery rename failure was not injected'
+if FAKE_CORRUPT_AFTER_EXCHANGE=1 \
+  "$rename_failure_repo/scripts/package-release.sh" v1.0.0 \
+  >/dev/null 2>"$package_tmp/rename-failure-error"; then
+  fail 'packager accepted a failed recovery-name transition'
+fi
+rename_failure_stage=$(find "$rename_failure_repo/.release-staging" \
+  -mindepth 1 -maxdepth 1 -type d -name 'package-v1.0.0.*' -print -quit)
+[[ -d $rename_failure_stage ]] ||
+  fail 'failed recovery rename must retain the original stage'
+[[ -f $rename_failure_repo/dist/remotechromemcp-v1.0.0.tar.gz ]] ||
+  fail 'failed recovery rename must not enter the rollback exchange'
+if (cd "$rename_failure_repo/dist" &&
+  sha256sum -c remotechromemcp-v1.0.0.tar.gz.sha256) >/dev/null 2>&1; then
+  fail 'recovery rename fault did not retain the injected invalid public state'
+fi
+if "$rename_failure_repo/scripts/package-release.sh" v1.0.0 \
+  >/dev/null 2>"$package_tmp/rename-failure-rerun-error"; then
+  fail 'next run must not reap a package stage beside an invalid public pair'
+fi
+[[ -d $rename_failure_stage ]] ||
+  fail 'proof-based recovery deleted a stage after rename failure'
+grep -Fq "$rename_failure_stage" "$package_tmp/rename-failure-rerun-error" ||
+  fail 'proof-based recovery did not report the retained package stage'
+
+sync_failure_repo="$package_tmp/recovery-sync-failure-repo"
+init_package_repo "$sync_failure_repo" v1.0.0
+inject_post_exchange_corruption "$sync_failure_repo"
+sed -i \
+  '/^sync_staging_root() {$/a \  [[ ${FAKE_RECOVERY_SYNC_FAIL:-0} != 1 ]] || return 76' \
+  "$sync_failure_repo/scripts/package-release.sh"
+retag_package_repo "$sync_failure_repo" v1.0.0
+grep -Fq 'FAKE_RECOVERY_SYNC_FAIL' \
+  "$sync_failure_repo/scripts/package-release.sh" ||
+  fail 'recovery sync failure was not injected'
+if FAKE_CORRUPT_AFTER_EXCHANGE=1 FAKE_RECOVERY_SYNC_FAIL=1 \
+  "$sync_failure_repo/scripts/package-release.sh" v1.0.0 \
+  >/dev/null 2>"$package_tmp/sync-failure-error"; then
+  fail 'packager accepted a failed durable recovery sync'
+fi
+sync_failure_recovery=$(find "$sync_failure_repo/.release-staging" \
+  -mindepth 1 -maxdepth 1 -type d -name 'recovery-v1.0.0.*' -print -quit)
+[[ -d $sync_failure_recovery ]] ||
+  fail 'sync failure must retain the atomically named recovery directory'
+[[ -f $sync_failure_repo/dist/remotechromemcp-v1.0.0.tar.gz ]] ||
+  fail 'failed recovery sync must not enter the rollback exchange'
+if (cd "$sync_failure_repo/dist" &&
+  sha256sum -c remotechromemcp-v1.0.0.tar.gz.sha256) >/dev/null 2>&1; then
+  fail 'recovery sync fault did not retain the injected invalid public state'
+fi
+if "$sync_failure_repo/scripts/package-release.sh" v1.0.0 \
+  >/dev/null 2>"$package_tmp/sync-failure-rerun-error"; then
+  fail 'next run must refuse recovery material after sync failure'
+fi
+[[ -d $sync_failure_recovery ]] ||
+  fail 'next run deleted recovery material after sync failure'
+
+for rollback_crash_mode in before after; do
+  rollback_crash_repo="$package_tmp/rollback-crash-$rollback_crash_mode-repo"
+  init_package_repo "$rollback_crash_repo" v1.0.0
+  inject_post_exchange_corruption "$rollback_crash_repo"
+  rollback_crash_python="$package_tmp/rollback-crash-$rollback_crash_mode-python"
+  cat >"$rollback_crash_python" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+count=0
+[[ ! -f $FAKE_EXCHANGE_COUNT ]] || count=$(<"$FAKE_EXCHANGE_COUNT")
+count=$((count + 1))
+printf '%s\n' "$count" >"$FAKE_EXCHANGE_COUNT"
+if [[ $count -eq 2 && $FAKE_ROLLBACK_CRASH_MODE == before ]]; then
+  kill -KILL "$FAKE_PACKAGE_CRASH_PID"
+  exit 137
+fi
+/usr/bin/python3 "$@"
+if [[ $count -eq 2 && $FAKE_ROLLBACK_CRASH_MODE == after ]]; then
+  kill -KILL "$FAKE_PACKAGE_CRASH_PID"
+  exit 137
+fi
+EOF
+  chmod +x "$rollback_crash_python"
+  sed -i \
+    's|/usr/bin/python3 -I -S - "$staged_dist" "$dist_dir"|'\
+"$rollback_crash_python"' -I -S - "$staged_dist" "$dist_dir"|' \
+    "$rollback_crash_repo/scripts/package-release.sh"
+  sed -i '/^umask 077$/a export FAKE_PACKAGE_CRASH_PID=$BASHPID' \
+    "$rollback_crash_repo/scripts/package-release.sh"
+  retag_package_repo "$rollback_crash_repo" v1.0.0
+  if FAKE_CORRUPT_AFTER_EXCHANGE=1 \
+    FAKE_EXCHANGE_COUNT="$package_tmp/rollback-crash-$rollback_crash_mode-count" \
+    FAKE_ROLLBACK_CRASH_MODE="$rollback_crash_mode" \
+    "$rollback_crash_repo/scripts/package-release.sh" v1.0.0 \
+    >/dev/null 2>"$package_tmp/rollback-crash-$rollback_crash_mode-error"; then
+    fail "rollback $rollback_crash_mode crash unexpectedly reported success"
+  fi
+  rollback_crash_recovery=$(find "$rollback_crash_repo/.release-staging" \
+    -mindepth 1 -maxdepth 1 -type d -name 'recovery-v1.0.0.*' -print -quit)
+  [[ -d $rollback_crash_recovery ]] ||
+    fail "rollback $rollback_crash_mode crash lost recovery material"
+  if [[ $rollback_crash_mode == before ]]; then
+    [[ -f $rollback_crash_repo/dist/remotechromemcp-v1.0.0.tar.gz ]] ||
+      fail 'pre-exchange rollback crash did not retain the candidate outcome'
+  else
+    [[ ! -e $rollback_crash_repo/dist/remotechromemcp-v1.0.0.tar.gz ]] ||
+      fail 'post-exchange rollback crash did not retain the prior-dist outcome'
+  fi
+  rm -f "$rollback_crash_recovery/RECOVERY_REQUIRED"
+  if "$rollback_crash_repo/scripts/package-release.sh" v1.0.0 \
+    >/dev/null 2>"$package_tmp/rollback-crash-$rollback_crash_mode-rerun-error"; then
+    fail "next run reaped name-only recovery after $rollback_crash_mode rollback crash"
+  fi
+  [[ -d $rollback_crash_recovery ]] ||
+    fail "name-only recovery was deleted after $rollback_crash_mode rollback crash"
+  [[ $(find "$rollback_crash_repo/.release-staging" \
+    -mindepth 1 -maxdepth 1 -type d | wc -l) -eq 1 ]] ||
+    fail "rollback $rollback_crash_mode crash left unbounded recovery residue"
+done
 
 dirty_tracked_repo="$package_tmp/dirty-tracked-repo"
 init_package_repo "$dirty_tracked_repo" v1.0.0
