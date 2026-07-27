@@ -310,11 +310,31 @@ vm_load_installed_configuration() {
   vm_merge_installed_configuration
 }
 
+vm_require_runtime_directory_destination() {
+  local destination=$1 expected base
+  if [[ -n ${REMOTE_CHROME_TEST_ROOT:-} ]]; then
+    vm_require_management_destination "$destination"
+    return
+  fi
+  [[ -n ${REMOTE_CHROME_DATA_DIR:-} &&
+     $REMOTE_CHROME_DATA_DIR == /* ]] || return 1
+  vm_require_management_destination "$REMOTE_CHROME_DATA_DIR" || return 1
+  base=${destination##*/}
+  case "$base" in
+    profile|caddy-data|caddy-config|backups|restore-staging) ;;
+    *) return 1 ;;
+  esac
+  expected=$(realpath -sm -- "$REMOTE_CHROME_DATA_DIR/$base") || return 1
+  [[ $(realpath -sm -- "$destination") == "$expected" &&
+     $destination == "$REMOTE_CHROME_DATA_DIR/$base" &&
+     ! -L $destination ]]
+}
+
 vm_migrate_runtime_directory() {
   local destination=$1 owner=$2
   local current_owner current_mode root_device device_output device
   local owner_output entry_owner tree_correct=1
-  vm_require_management_destination "$destination" || return 1
+  vm_require_runtime_directory_destination "$destination" || return 1
   [[ $owner =~ ^[0-9]+:[0-9]+$ ]] || return 1
   [[ -d $destination && ! -L $destination ]] || return 1
 
@@ -340,7 +360,7 @@ vm_migrate_runtime_directory() {
     return 0
   fi
 
-  vm_require_management_destination "$destination" || return 1
+  vm_require_runtime_directory_destination "$destination" || return 1
   [[ -d $destination && ! -L $destination ]] || return 1
   find -P "$destination" -xdev \
     -exec chown -h "$owner" -- {} + || return 1
@@ -349,7 +369,7 @@ vm_migrate_runtime_directory() {
 
 vm_create_runtime_directory() {
   local destination=$1 owner=${2:-}
-  vm_require_management_destination "$destination" || return 1
+  vm_require_runtime_directory_destination "$destination" || return 1
   if [[ -e $destination || -L $destination ]]; then
     [[ -d $destination && ! -L $destination ]] || return 1
     if [[ -n $owner ]]; then
@@ -358,7 +378,7 @@ vm_create_runtime_directory() {
     return 0
   fi
   install -d -m 0700 "$destination" || return 1
-  vm_require_management_destination "$destination" || return 1
+  vm_require_runtime_directory_destination "$destination" || return 1
   if [[ -n $owner ]]; then
     chown "$owner" "$destination" || return 1
   fi
