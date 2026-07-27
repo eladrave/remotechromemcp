@@ -27,7 +27,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 RUN test -n "$PLAYWRIGHT_MCP_VERSION" \
-    && npm install -g "@playwright/mcp=${PLAYWRIGHT_MCP_VERSION}" \
+    && npm install -g "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" \
     && groupadd --gid 10001 remote-chrome \
     && useradd --uid 10001 --gid remote-chrome --create-home \
       --home-dir /home/remote-chrome remote-chrome \

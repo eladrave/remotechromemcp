@@ -32,11 +32,22 @@ for file in \
 done
 
 tmp_dir="$(mktemp -d)"
-trap 'rm -rf "$tmp_dir"' EXIT
 env_file="$tmp_dir/compose.env"
 rendered_yaml="$tmp_dir/compose.yaml"
 rendered_json="$tmp_dir/compose.json"
 expected_hash='$2a$12$abcdefghijklmnopqrstuuABCDEFGHIJKLMNOPQRSTUVWXYZ01234'
+project_name="remote-chrome-config-test-$$"
+
+cleanup() {
+  if command -v docker >/dev/null 2>&1 &&
+    docker compose version >/dev/null 2>&1 &&
+    docker info >/dev/null 2>&1; then
+    docker compose --project-name "$project_name" --env-file "$env_file" \
+      down --volumes --remove-orphans >/dev/null 2>&1 || true
+  fi
+  rm -rf "$tmp_dir"
+}
+trap cleanup EXIT
 
 cp .env.example "$env_file"
 sed -i \
@@ -47,11 +58,18 @@ sed -i \
   -e "s|^LOGIN_PASSWORD_HASH=.*|LOGIN_PASSWORD_HASH='$expected_hash'|" \
   "$env_file"
 
-if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-  docker compose --env-file "$env_file" config >"$rendered_yaml"
-  docker compose --env-file "$env_file" config --format json >"$rendered_json"
+if command -v docker >/dev/null 2>&1 &&
+  docker compose version >/dev/null 2>&1 &&
+  docker info >/dev/null 2>&1; then
+  compose=(
+    docker compose
+    --project-name "$project_name"
+    --env-file "$env_file"
+  )
+  "${compose[@]}" config >"$rendered_yaml"
+  "${compose[@]}" config --format json >"$rendered_json"
 
-  CONFIG_JSON="$rendered_json" EXPECTED_HASH="$expected_hash" node <<'NODE'
+  CONFIG_JSON="$rendered_json" node <<'NODE'
 const fs = require('node:fs');
 
 const config = JSON.parse(fs.readFileSync(process.env.CONFIG_JSON, 'utf8'));
@@ -89,9 +107,12 @@ const proxyMounts = (proxy.volumes || []).map(volume => `${volume.source}:${volu
 if (!proxyMounts.includes('caddy-data:/data') || !proxyMounts.includes('caddy-config:/config'))
   throw new Error('proxy must persist Caddy data and configuration');
 
-if (proxy.environment.LOGIN_PASSWORD_HASH !== process.env.EXPECTED_HASH)
-  throw new Error('bcrypt hash did not survive Compose interpolation intact');
 NODE
+
+  actual_hash="$("${compose[@]}" run --rm --no-deps \
+    --entrypoint printenv proxy LOGIN_PASSWORD_HASH)"
+  [[ "$actual_hash" == "$expected_hash" ]] ||
+    fail 'bcrypt hash did not survive Compose interpolation at container runtime'
 else
   if [[ "${CI:-}" == "1" ]]; then
     fail "docker compose unavailable in CI"
@@ -148,8 +169,8 @@ assert_contains docker/Dockerfile '^FROM node:22-bookworm-slim$' \
   'Dockerfile must use node:22-bookworm-slim'
 assert_contains docker/Dockerfile 'google-chrome-stable' \
   'Dockerfile must install full Google Chrome'
-assert_contains docker/Dockerfile 'npm install -g "@playwright/mcp=\$\{PLAYWRIGHT_MCP_VERSION\}"' \
-  'Dockerfile must install the pinned Playwright MCP version'
+assert_contains docker/Dockerfile 'npm install -g "@playwright/mcp@\$\{PLAYWRIGHT_MCP_VERSION\}"' \
+  'Dockerfile must use a valid npm package spec for the pinned Playwright MCP version'
 assert_contains docker/Dockerfile '^USER remote-chrome$' \
   'browser runtime must run as a non-root user'
 
