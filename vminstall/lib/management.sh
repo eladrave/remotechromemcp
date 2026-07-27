@@ -84,7 +84,7 @@ vm_management_browser_state() {
     vm_compose_for_release "$release" \
       "$REMOTE_CHROME_CONFIG_ROOT/compose.env" \
       exec -T browser sh -c \
-      'chrome_version=$(curl -fsS --max-time 5 http://127.0.0.1:9222/json/version); printf "%s\n" "$chrome_version"; grep -F "Remote Browser Interaction Playbook" /app/browser-playbook.md'
+      'chrome_version=$(curl -fsS --max-time 5 http://127.0.0.1:9222/json/version); printf "%s\n" "$chrome_version"; grep -F "Remote Browser Interaction Playbook" /opt/remote-chrome/browser-playbook.md'
   ) || return 1
   VM_MANAGEMENT_CHROME_VERSION=$(
     grep -Eo 'Chrome/[0-9][^[:space:]"]*' <<<"$output" | head -n 1

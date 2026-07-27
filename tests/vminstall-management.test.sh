@@ -817,6 +817,8 @@ assert_order "$fake_log" \
   fail 'ExecStartPost target must be installed before service activation'
 grep -Fq ' <ps> ' "$fake_log" ||
   fail 'the installed ExecStartPost wait-ready target must execute successfully'
+grep -Fq '/opt/remote-chrome/browser-playbook.md' "$fake_log" ||
+  fail 'browser readiness must verify the playbook at its image path'
 [[ $(stat -c '%a' "$REMOTE_CHROME_CONFIG_ROOT/activation-diagnostic.log") == 600 ]] ||
   fail 'Compose diagnostics must be retained only in a root-only mode-600 file'
 [[ $(<"$REMOTE_CHROME_PROTOCOL_LOG") == $'anonymous-401\ninitialize\ndelete\nget-405\nlogin-401\nlogin-200\nwebsocket-101' ]] ||
