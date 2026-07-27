@@ -73,7 +73,7 @@ readonly REMOTE_CHROME_TEST_ROOT REMOTE_CHROME_CANONICAL_TEST_ROOT \
 
 current="$REMOTE_CHROME_INSTALL_ROOT/current"
 
-for library in common wizard config release activate management; do
+for library in common wizard config release activate backup management; do
   library_path="$current/vminstall/lib/$library.sh"
   [[ -f $library_path && ! -L $library_path ]] || {
     printf 'ERROR: installed management library is unavailable: %s\n' \

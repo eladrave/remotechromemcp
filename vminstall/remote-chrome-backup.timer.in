@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule Remote Chrome profile backups
+
+[Timer]
+OnCalendar=@BACKUP_SCHEDULE@
+Persistent=true
+RandomizedDelaySec=15m
+Unit=remote-chrome-backup.service
+
+[Install]
+WantedBy=timers.target

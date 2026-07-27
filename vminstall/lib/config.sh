@@ -136,6 +136,36 @@ vm_render_systemd_service() {
   vm_write_managed_file "$destination" 0644 <"$template"
 }
 
+vm_render_backup_units() {
+  local service_destination="$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome-backup.service.candidate"
+  local timer_destination="$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome-backup.timer.candidate"
+  local template_root
+  template_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  vm_require_management_destination "$service_destination" || return 1
+  vm_require_management_destination "$timer_destination" || return 1
+  if [[ -z ${BACKUP_SCHEDULE:-} ]]; then
+    rm -f -- "$service_destination" "$timer_destination"
+    return 0
+  fi
+  vm_validate_config_value "$BACKUP_SCHEDULE" || return 1
+  [[ -f $template_root/remote-chrome-backup.service.in &&
+     ! -L $template_root/remote-chrome-backup.service.in &&
+     -f $template_root/remote-chrome-backup.timer.in &&
+     ! -L $template_root/remote-chrome-backup.timer.in ]] || return 1
+  vm_write_managed_file "$service_destination" 0644 \
+    <"$template_root/remote-chrome-backup.service.in" || return 1
+  {
+    local line
+    while IFS= read -r line || [[ -n $line ]]; do
+      if [[ $line == 'OnCalendar=@BACKUP_SCHEDULE@' ]]; then
+        printf 'OnCalendar=%s\n' "$BACKUP_SCHEDULE"
+      else
+        printf '%s\n' "$line"
+      fi
+    done <"$template_root/remote-chrome-backup.timer.in"
+  } | vm_write_managed_file "$timer_destination" 0644
+}
+
 vm_generate_credentials() {
   local installed_credentials="$REMOTE_CHROME_CONFIG_ROOT/credentials.env"
   local installed_compose="$REMOTE_CHROME_CONFIG_ROOT/compose.env"
@@ -282,4 +312,5 @@ vm_prepare_config() {
   vm_render_install_env || return 1
   vm_render_compose_env || return 1
   vm_render_systemd_service || return 1
+  vm_render_backup_units || return 1
 }

@@ -16,6 +16,8 @@ source "$installer_dir/lib/release.sh"
 source "$installer_dir/lib/config.sh"
 # shellcheck source=lib/activate.sh
 source "$installer_dir/lib/activate.sh"
+# shellcheck source=lib/backup.sh
+source "$installer_dir/lib/backup.sh"
 
 vm_installer_main() {
   vm_parse_args "$@" || return $?

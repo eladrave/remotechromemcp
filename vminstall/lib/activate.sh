@@ -272,7 +272,9 @@ vm_snapshot_activation_state() {
     "$REMOTE_CHROME_CONFIG_ROOT/certificate.env" \
     "$REMOTE_CHROME_CONFIG_ROOT/active-version" \
     "$REMOTE_CHROME_CONFIG_ROOT/previous-version" \
-    "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome.service"; do
+    "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome.service" \
+    "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome-backup.service" \
+    "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome-backup.timer"; do
     name=${source##*/}
     if [[ -e $source || -L $source ]]; then
       [[ -f $source && ! -L $source ]] || return 1
@@ -293,6 +295,12 @@ vm_snapshot_activation_state() {
   fi
   if vm_run_bounded systemctl is-active --quiet remote-chrome.service; then
     : >"$snapshot/service.active"
+  fi
+  if vm_run_bounded systemctl is-enabled --quiet remote-chrome-backup.timer; then
+    : >"$snapshot/backup-timer.enabled"
+  fi
+  if vm_run_bounded systemctl is-active --quiet remote-chrome-backup.timer; then
+    : >"$snapshot/backup-timer.active"
   fi
 }
 
@@ -316,10 +324,13 @@ vm_restore_activation_state() {
     "$REMOTE_CHROME_CONFIG_ROOT/certificate.env" \
     "$REMOTE_CHROME_CONFIG_ROOT/active-version" \
     "$REMOTE_CHROME_CONFIG_ROOT/previous-version" \
-    "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome.service"; do
+    "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome.service" \
+    "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome-backup.service" \
+    "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome-backup.timer"; do
     name=${destination##*/}
     mode=0600
-    [[ $destination == "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome.service" ]] &&
+    [[ $destination == "$REMOTE_CHROME_SYSTEMD_ROOT/"*.service ||
+       $destination == "$REMOTE_CHROME_SYSTEMD_ROOT/"*.timer ]] &&
       mode=0644
     if [[ -f $snapshot/$name.present ]]; then
       vm_restore_managed_file "$snapshot/$name" "$destination" "$mode" ||
@@ -364,6 +375,22 @@ vm_install_candidate_config() {
   [[ -f $service_candidate ]] || return 1
   vm_write_managed_file "$service_destination" 0644 <"$service_candidate" ||
     return 1
+  local backup_name backup_candidate backup_destination
+  if [[ -n ${BACKUP_SCHEDULE:-} ]]; then
+    for backup_name in remote-chrome-backup.service remote-chrome-backup.timer; do
+      backup_candidate="$REMOTE_CHROME_SYSTEMD_ROOT/$backup_name.candidate"
+      backup_destination="$REMOTE_CHROME_SYSTEMD_ROOT/$backup_name"
+      [[ -f $backup_candidate && ! -L $backup_candidate ]] || return 1
+      vm_write_managed_file "$backup_destination" 0644 <"$backup_candidate" ||
+        return 1
+    done
+  else
+    vm_run_bounded systemctl disable --now remote-chrome-backup.timer \
+      >/dev/null 2>&1 || true
+    rm -f -- \
+      "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome-backup.service" \
+      "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome-backup.timer"
+  fi
 
   local cli_candidate="$REMOTE_CHROME_INSTALL_ROOT/releases/$SELECTED_VERSION/vminstall/remote-chrome"
   local cli_destination="$REMOTE_CHROME_CLI_ROOT/remote-chrome"
@@ -379,7 +406,9 @@ vm_cleanup_candidate_config() {
     "$REMOTE_CHROME_CONFIG_ROOT/compose.env.candidate" \
     "$REMOTE_CHROME_CONFIG_ROOT/credentials.env.candidate" \
     "$REMOTE_CHROME_CONFIG_ROOT/candidate-shutdown.log" \
-    "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome.service.candidate"; do
+    "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome.service.candidate" \
+    "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome-backup.service.candidate" \
+    "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome-backup.timer.candidate"; do
     vm_require_management_destination "$candidate" || return 1
     rm -f -- "$candidate"
   done
@@ -446,12 +475,23 @@ vm_remove_candidate_release() {
   rm -rf -- "$candidate_release"
 }
 
+vm_activate_backup_timer() {
+  if [[ -n ${BACKUP_SCHEDULE:-} ]]; then
+    vm_run_bounded systemctl enable --now remote-chrome-backup.timer
+  else
+    vm_run_bounded systemctl disable --now remote-chrome-backup.timer \
+      >/dev/null 2>&1 || true
+  fi
+}
+
 vm_rollback_release() {
   local previous_target=$1 snapshot=$2 candidate_release=$3
   local rollback_failed=0 prior_health_failed=0
   vm_stop_candidate_release "$candidate_release" || rollback_failed=1
   vm_run_bounded systemctl stop remote-chrome.service || rollback_failed=1
   vm_run_bounded systemctl disable remote-chrome.service || rollback_failed=1
+  vm_run_bounded systemctl disable --now remote-chrome-backup.timer \
+    >/dev/null 2>&1 || true
 
   if [[ -n $previous_target ]]; then
     vm_switch_current "$previous_target" || rollback_failed=1
@@ -471,6 +511,14 @@ vm_rollback_release() {
       vm_wait_stack_health "$REMOTE_CHROME_INSTALL_ROOT/$previous_target"; then
       prior_health_failed=1
     fi
+  fi
+  if [[ -f $snapshot/backup-timer.enabled ]]; then
+    vm_run_bounded systemctl enable remote-chrome-backup.timer ||
+      rollback_failed=1
+  fi
+  if [[ -f $snapshot/backup-timer.active ]]; then
+    vm_run_bounded systemctl start remote-chrome-backup.timer ||
+      rollback_failed=1
   fi
   if ((prior_health_failed == 1)); then
     printf 'ERROR: rollback health verification failed\n' >&2
@@ -531,6 +579,8 @@ vm_activate_release() {
      vm_activation_transition service-reloaded &&
      vm_run_bounded systemctl enable --now remote-chrome.service &&
      vm_activation_transition service-started &&
+     vm_activate_backup_timer &&
+     vm_activation_transition backup-timer-configured &&
      vm_activation_transition health-verified &&
      vm_activation_transition public-verified &&
      { if [[ -n $previous_target ]]; then

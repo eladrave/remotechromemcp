@@ -76,7 +76,12 @@ vm_verify_release() {
   local staging=${1:-${STAGED_RELEASE_DIR:-}}
   [[ -n $staging && -d $staging && ! -L $staging ]] || return 1
   [[ -f "$staging/compose.yaml" &&
-     -f "$staging/vminstall/compose.vm.yaml" ]]
+     -f "$staging/vminstall/compose.vm.yaml" &&
+     -f "$staging/vminstall/remote-chrome" &&
+     -x "$staging/vminstall/remote-chrome" &&
+     -f "$staging/vminstall/remote-chrome-backup.service.in" &&
+     -f "$staging/vminstall/remote-chrome-backup.timer.in" &&
+     -f "$staging/vminstall/lib/backup.sh" ]]
 }
 
 vm_stage_release() {

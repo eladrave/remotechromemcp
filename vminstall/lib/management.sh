@@ -10,7 +10,7 @@ vm_management_usage() {
     '  wait-ready' \
     '  update --version REF [--allow-unpinned]' \
     '  backup' \
-    '  restore' \
+    '  restore GCS_MANIFEST' \
     '  uninstall [--delete-profile] [--delete-backups]' \
     '            [--delete-all-data] [--force]'
 }
@@ -229,7 +229,7 @@ vm_management_download_release() {
   printf '%s/%s' "$download_dir" "$archive_name"
 }
 
-vm_management_update() {
+vm_management_update_locked() {
   vm_require_root
   local ref= allow_unpinned=0 archive= download_dir=
   while (($#)); do
@@ -334,7 +334,7 @@ vm_management_confirmation_tty() {
   fi
 }
 
-vm_management_uninstall() {
+vm_management_uninstall_locked() {
   vm_require_root
   local delete_profile=0 delete_backups=0 delete_all=0 force=0
   while (($#)); do
@@ -369,6 +369,8 @@ vm_management_uninstall() {
   local data_root=$REMOTE_CHROME_DATA_DIR
   local profile="$data_root/profile" backups="$data_root/backups"
   local unit="$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome.service"
+  local backup_unit="$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome-backup.service"
+  local backup_timer="$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome-backup.timer"
   local cli="$REMOTE_CHROME_CLI_ROOT/remote-chrome"
   vm_management_validate_data_root "$data_root" ||
     vm_die 64 'Configured data root is unsafe'
@@ -378,6 +380,14 @@ vm_management_uninstall() {
   vm_management_validate_delete_target \
     "$unit" "$REMOTE_CHROME_TRUSTED_SYSTEMD_ROOT/remote-chrome.service" ||
     vm_die 64 'Service unit path is unsafe'
+  vm_management_validate_delete_target \
+    "$backup_unit" \
+    "$REMOTE_CHROME_TRUSTED_SYSTEMD_ROOT/remote-chrome-backup.service" ||
+    vm_die 64 'Backup service unit path is unsafe'
+  vm_management_validate_delete_target \
+    "$backup_timer" \
+    "$REMOTE_CHROME_TRUSTED_SYSTEMD_ROOT/remote-chrome-backup.timer" ||
+    vm_die 64 'Backup timer unit path is unsafe'
   vm_management_validate_delete_target \
     "$cli" "$REMOTE_CHROME_TRUSTED_CLI_ROOT/remote-chrome" ||
     vm_die 64 'Management CLI path is unsafe'
@@ -428,7 +438,9 @@ vm_management_uninstall() {
 
   vm_run_bounded systemctl stop remote-chrome.service
   vm_run_bounded systemctl disable remote-chrome.service
-  rm -f -- "$unit"
+  vm_run_bounded systemctl disable --now remote-chrome-backup.timer ||
+    true
+  rm -f -- "$unit" "$backup_unit" "$backup_timer"
   vm_run_bounded systemctl daemon-reload
   rm -f -- "$cli"
   rm -rf -- "$REMOTE_CHROME_INSTALL_ROOT"
@@ -440,13 +452,39 @@ vm_management_uninstall() {
   fi
 }
 
-vm_management_unavailable() {
-  local command=$1
-  shift
+vm_management_backup() {
   vm_management_require_no_args "$@" || return $?
-  printf 'ERROR: remote-chrome %s is unavailable until backup support is installed\n' \
-    "$command" >&2
-  return 69
+  vm_require_root
+  vm_management_load_installed_state ||
+    vm_die 69 'Installed configuration is unavailable'
+  vm_backup_profile "gs://$GCS_BUCKET/remote-chrome"
+}
+
+vm_management_restore() {
+  (($# == 1)) || {
+    vm_management_usage >&2
+    return 2
+  }
+  vm_require_root
+  vm_management_load_installed_state ||
+    vm_die 69 'Installed configuration is unavailable'
+  [[ $1 == "gs://$GCS_BUCKET/"*.manifest ]] || {
+    printf 'ERROR: restore requires an exact manifest URI in the configured bucket\n' >&2
+    return 2
+  }
+  vm_restore_profile "$1"
+}
+
+vm_management_update() {
+  vm_management_load_installed_state ||
+    vm_die 69 'Installed configuration is unavailable'
+  vm_with_maintenance_lock vm_management_update_locked "$@"
+}
+
+vm_management_uninstall() {
+  vm_management_load_installed_state ||
+    vm_die 69 'Installed configuration is unavailable'
+  vm_with_maintenance_lock vm_management_uninstall_locked "$@"
 }
 
 vm_management_dispatch() {
@@ -460,8 +498,8 @@ vm_management_dispatch() {
     login) vm_management_login "$@" ;;
     wait-ready) vm_management_wait_ready "$@" ;;
     update) vm_management_update "$@" ;;
-    backup) vm_management_unavailable backup "$@" ;;
-    restore) vm_management_unavailable restore "$@" ;;
+    backup) vm_management_backup "$@" ;;
+    restore) vm_management_restore "$@" ;;
     uninstall) vm_management_uninstall "$@" ;;
     *)
       vm_management_usage >&2

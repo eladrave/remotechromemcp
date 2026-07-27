@@ -162,14 +162,14 @@ apply_patch_fake "$fake_bin/systemctl" \
   '  is-enabled) [[ -f "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/enabled" ]] ;;' \
   '  is-active) [[ -f "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/active" ]] ;;' \
   '  enable)' \
-  '    touch "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/enabled"' \
-  '    if [[ " $* " == *" --now "* ]]; then' \
+  '    [[ ${!#} == remote-chrome-backup.timer ]] || touch "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/enabled"' \
+  '    if [[ " $* " == *" --now "* && ${!#} == remote-chrome.service ]]; then' \
   '      touch "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/active"' \
   '      "$REMOTE_CHROME_CLI_ROOT/remote-chrome" wait-ready' \
   '      [[ ${REMOTE_CHROME_FAKE_SYSTEMCTL_ENABLE_NOW_FAIL:-0} != 1 ]]' \
   '    fi' \
   '    ;;' \
-  '  disable) rm -f "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/enabled" ;;' \
+  '  disable) [[ ${!#} == remote-chrome-backup.timer ]] || rm -f "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/enabled" ;;' \
   '  start) touch "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/active" ;;' \
   '  stop) rm -f "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/active" ;;' \
   'esac'
@@ -432,10 +432,13 @@ make_release() {
     chmod +x "$release/vminstall/remote-chrome"
     cp vminstall/install.sh "$release/vminstall/install.sh"
     chmod +x "$release/vminstall/install.sh"
-    cp vminstall/remote-chrome.service.in "$release/vminstall/"
+    cp vminstall/remote-chrome.service.in \
+      vminstall/remote-chrome-backup.service.in \
+      vminstall/remote-chrome-backup.timer.in "$release/vminstall/"
     cp vminstall/lib/common.sh vminstall/lib/wizard.sh \
       vminstall/lib/release.sh vminstall/lib/config.sh \
-      vminstall/lib/activate.sh "$release/vminstall/lib/"
+      vminstall/lib/activate.sh vminstall/lib/backup.sh \
+      "$release/vminstall/lib/"
     if [[ -f vminstall/lib/management.sh ]]; then
       cp vminstall/lib/management.sh "$release/vminstall/lib/management.sh"
     fi
@@ -492,10 +495,13 @@ setup_activation_fixture() {
   if [[ -f vminstall/remote-chrome ]]; then
     cp vminstall/remote-chrome "$STAGED_RELEASE_DIR/vminstall/remote-chrome"
     chmod +x "$STAGED_RELEASE_DIR/vminstall/remote-chrome"
+    cp vminstall/remote-chrome-backup.service.in \
+      vminstall/remote-chrome-backup.timer.in "$STAGED_RELEASE_DIR/vminstall/"
     cp vminstall/lib/common.sh vminstall/lib/wizard.sh \
       vminstall/lib/release.sh \
       vminstall/lib/config.sh vminstall/lib/activate.sh \
-      vminstall/lib/management.sh "$STAGED_RELEASE_DIR/vminstall/lib/"
+      vminstall/lib/management.sh vminstall/lib/backup.sh \
+      "$STAGED_RELEASE_DIR/vminstall/lib/"
   fi
   REMOTE_CHROME_TRANSITION_LOG="$root/transitions.log"
   : >"$REMOTE_CHROME_TRANSITION_LOG"
@@ -660,10 +666,13 @@ printf 'services: {}\n' >"$STAGED_RELEASE_DIR/compose.yaml"
 printf 'services: {}\n' >"$STAGED_RELEASE_DIR/vminstall/compose.vm.yaml"
 cp vminstall/remote-chrome "$STAGED_RELEASE_DIR/vminstall/remote-chrome"
 chmod +x "$STAGED_RELEASE_DIR/vminstall/remote-chrome"
+cp vminstall/remote-chrome-backup.service.in \
+  vminstall/remote-chrome-backup.timer.in "$STAGED_RELEASE_DIR/vminstall/"
 cp vminstall/lib/common.sh vminstall/lib/wizard.sh \
   vminstall/lib/release.sh \
   vminstall/lib/config.sh vminstall/lib/activate.sh \
-  vminstall/lib/management.sh "$STAGED_RELEASE_DIR/vminstall/lib/"
+  vminstall/lib/management.sh vminstall/lib/backup.sh \
+  "$STAGED_RELEASE_DIR/vminstall/lib/"
 : >"$REMOTE_CHROME_TRANSITION_LOG"
 : >"$fake_log"
 : >"$REMOTE_CHROME_PROTOCOL_LOG"
@@ -920,10 +929,13 @@ make_update_archive() {
   cp compose.yaml "$source/compose.yaml"
   cp vminstall/compose.vm.yaml vminstall/install.sh \
     vminstall/remote-chrome vminstall/remote-chrome.service.in \
+    vminstall/remote-chrome-backup.service.in \
+    vminstall/remote-chrome-backup.timer.in \
     "$source/vminstall/"
   cp vminstall/lib/common.sh vminstall/lib/wizard.sh \
     vminstall/lib/release.sh vminstall/lib/config.sh \
-    vminstall/lib/activate.sh "$source/vminstall/lib/"
+    vminstall/lib/activate.sh vminstall/lib/backup.sh \
+    "$source/vminstall/lib/"
   if [[ -f vminstall/lib/management.sh ]]; then
     cp vminstall/lib/management.sh "$source/vminstall/lib/management.sh"
   fi
@@ -1079,20 +1091,20 @@ for secret in "$cli_token" "$cli_password" "$cli_hash"; do
     fail 'wait-ready must not print installed secrets'
 done
 
-for unavailable_command in backup restore; do
-  set +e
-  run_cli "$cli_root" "$unavailable_command" \
-    >"$cli_root/$unavailable_command.stdout" \
-    2>"$cli_root/$unavailable_command.stderr"
-  unavailable_status=$?
-  set -e
-  [[ $unavailable_status -eq 69 &&
-     ! -s $cli_root/$unavailable_command.stdout ]] ||
-    fail "$unavailable_command must report unavailable without false success"
-  grep -Fq 'unavailable until backup support is installed' \
-    "$cli_root/$unavailable_command.stderr" ||
-    fail "$unavailable_command must explain its Task 6 boundary"
-done
+set +e
+run_cli "$cli_root" backup unexpected \
+  >"$cli_root/backup-args.stdout" 2>"$cli_root/backup-args.stderr"
+backup_args_status=$?
+run_cli "$cli_root" restore \
+  >"$cli_root/restore-args.stdout" 2>"$cli_root/restore-args.stderr"
+restore_args_status=$?
+run_cli "$cli_root" restore gs://other-bucket/remote-chrome/example.manifest \
+  >"$cli_root/restore-bucket.stdout" 2>"$cli_root/restore-bucket.stderr"
+restore_bucket_status=$?
+set -e
+[[ $backup_args_status -eq 2 && $restore_args_status -eq 2 &&
+   $restore_bucket_status -eq 2 ]] ||
+  fail 'backup and restore CLI arguments must enforce the Task 6 contract'
 
 set +e
 run_cli "$cli_root" update >"$cli_root/update-missing.stdout" \

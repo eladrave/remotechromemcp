@@ -1,0 +1,9 @@
+[Unit]
+Description=Remote Chrome profile backup
+After=network-online.target remote-chrome.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/sbin/remote-chrome backup

@@ -280,13 +280,17 @@ root = os.environ["RELEASE_FIXTURE"]
 def add_file(archive, name, content=b"fixture\n"):
     info = tarfile.TarInfo(name)
     info.size = len(content)
-    info.mode = 0o644
+    info.mode = 0o755 if name.endswith("/remote-chrome") else 0o644
     archive.addfile(info, io.BytesIO(content))
 
 def base_archive(path):
     archive = tarfile.open(path, "w:gz")
     add_file(archive, "remotechromemcp-v1.2.3/compose.yaml")
     add_file(archive, "remotechromemcp-v1.2.3/vminstall/compose.vm.yaml")
+    add_file(archive, "remotechromemcp-v1.2.3/vminstall/remote-chrome")
+    add_file(archive, "remotechromemcp-v1.2.3/vminstall/remote-chrome-backup.service.in")
+    add_file(archive, "remotechromemcp-v1.2.3/vminstall/remote-chrome-backup.timer.in")
+    add_file(archive, "remotechromemcp-v1.2.3/vminstall/lib/backup.sh")
     return archive
 
 with base_archive(os.path.join(root, "remotechromemcp-v1.2.3.tar.gz")) as archive:
@@ -331,6 +335,10 @@ with base_archive(os.path.join(root, "control.tar.gz")) as archive:
 with tarfile.open(os.path.join(root, "remotechromemcp-master.tar.gz"), "w:gz") as archive:
     add_file(archive, "remotechromemcp-master/compose.yaml")
     add_file(archive, "remotechromemcp-master/vminstall/compose.vm.yaml")
+    add_file(archive, "remotechromemcp-master/vminstall/remote-chrome")
+    add_file(archive, "remotechromemcp-master/vminstall/remote-chrome-backup.service.in")
+    add_file(archive, "remotechromemcp-master/vminstall/remote-chrome-backup.timer.in")
+    add_file(archive, "remotechromemcp-master/vminstall/lib/backup.sh")
 PY
 
 (
