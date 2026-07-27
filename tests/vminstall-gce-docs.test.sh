@@ -206,6 +206,24 @@ init_package_repo() {
   done
 }
 
+inject_post_exchange_corruption() {
+  local destination=$1
+  sed -i \
+    '0,/^publish_dist_exchange$/s//publish_dist_exchange\nif [[ ${FAKE_CORRUPT_AFTER_EXCHANGE:-0} == 1 ]]; then printf "corrupt\\n" >>"$archive"; fi/' \
+    "$destination/scripts/package-release.sh"
+}
+
+retag_package_repo() {
+  local destination=$1
+  shift
+  git -C "$destination" add scripts/package-release.sh
+  git -C "$destination" commit -qm 'inject publication fault'
+  local fixture_tag
+  for fixture_tag in "$@"; do
+    git -C "$destination" tag -fa "$fixture_tag" -m "$fixture_tag" >/dev/null
+  done
+}
+
 package_repo="$package_tmp/repo"
 init_package_repo "$package_repo" v1.0.0
 grep -Fq '/usr/bin/mktemp -d "$staging_root/' \
@@ -429,6 +447,144 @@ fi
   fail 'no-op exchange fixture unexpectedly published an archive'
 [[ ! -s $package_tmp/noop-output ]] ||
   fail 'failed post-exchange verification must not print success paths'
+
+rollback_repo="$package_tmp/rollback-repo"
+init_package_repo "$rollback_repo" v1.0.0
+inject_post_exchange_corruption "$rollback_repo"
+retag_package_repo "$rollback_repo" v1.0.0
+if FAKE_CORRUPT_AFTER_EXCHANGE=1 \
+  "$rollback_repo/scripts/package-release.sh" v1.0.0 \
+  >"$package_tmp/rollback-output" 2>"$package_tmp/rollback-error"; then
+  fail 'packager accepted a corrupted pair after a real exchange'
+fi
+grep -Fq 'failed verification and was rolled back' \
+  "$package_tmp/rollback-error" ||
+  fail 'successful publication rollback was not reported'
+[[ ! -s $package_tmp/rollback-output ]] ||
+  fail 'rolled-back publication must not print success paths'
+if find "$rollback_repo/dist" -mindepth 1 -print -quit | grep -q .; then
+  fail 'first-publication rollback must restore the prior empty dist'
+fi
+if find "$rollback_repo/.release-staging" -mindepth 1 -print -quit |
+  grep -q .; then
+  fail 'confirmed rollback must remove the rejected candidate'
+fi
+"$rollback_repo/scripts/package-release.sh" v1.0.0 >/dev/null ||
+  fail 'a confirmed first-publication rollback must allow an immediate rerun'
+(cd "$rollback_repo/dist" &&
+  sha256sum -c remotechromemcp-v1.0.0.tar.gz.sha256) >/dev/null ||
+  fail 'immediate rerun after rollback did not publish a valid pair'
+
+existing_rollback_repo="$package_tmp/existing-rollback-repo"
+init_package_repo "$existing_rollback_repo" v1.0.0 v2.0.0
+inject_post_exchange_corruption "$existing_rollback_repo"
+retag_package_repo "$existing_rollback_repo" v1.0.0 v2.0.0
+"$existing_rollback_repo/scripts/package-release.sh" v1.0.0 >/dev/null
+existing_v1_archive="$existing_rollback_repo/dist/remotechromemcp-v1.0.0.tar.gz"
+existing_v1_checksum="$existing_v1_archive.sha256"
+existing_v1_hash=$(sha256sum "$existing_v1_archive")
+existing_v1_checksum_hash=$(sha256sum "$existing_v1_checksum")
+if FAKE_CORRUPT_AFTER_EXCHANGE=1 \
+  "$existing_rollback_repo/scripts/package-release.sh" v2.0.0 \
+  >/dev/null 2>"$package_tmp/existing-rollback-error"; then
+  fail 'packager accepted a corrupted second release pair'
+fi
+[[ $(sha256sum "$existing_v1_archive") == "$existing_v1_hash" &&
+   $(sha256sum "$existing_v1_checksum") == "$existing_v1_checksum_hash" ]] ||
+  fail 'rollback must preserve an existing release pair byte-for-byte'
+(cd "$existing_rollback_repo/dist" &&
+  sha256sum -c remotechromemcp-v1.0.0.tar.gz.sha256) >/dev/null ||
+  fail 'rollback damaged the existing release checksum pair'
+[[ ! -e $existing_rollback_repo/dist/remotechromemcp-v2.0.0.tar.gz &&
+   ! -e $existing_rollback_repo/dist/remotechromemcp-v2.0.0.tar.gz.sha256 ]] ||
+  fail 'rollback left the rejected second release at the public path'
+"$existing_rollback_repo/scripts/package-release.sh" v2.0.0 >/dev/null
+(cd "$existing_rollback_repo/dist" &&
+  sha256sum -c remotechromemcp-v1.0.0.tar.gz.sha256 &&
+  sha256sum -c remotechromemcp-v2.0.0.tar.gz.sha256) >/dev/null ||
+  fail 'rerun after existing-pair rollback did not preserve both releases'
+
+rollback_exchange_repo="$package_tmp/rollback-exchange-failure-repo"
+init_package_repo "$rollback_exchange_repo" v1.0.0
+inject_post_exchange_corruption "$rollback_exchange_repo"
+rollback_exchange_python="$package_tmp/rollback-exchange-python"
+cat >"$rollback_exchange_python" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+count=0
+[[ ! -f $FAKE_EXCHANGE_COUNT ]] || count=$(<"$FAKE_EXCHANGE_COUNT")
+count=$((count + 1))
+printf '%s\n' "$count" >"$FAKE_EXCHANGE_COUNT"
+[[ $count -ne 2 ]] || exit 73
+exec /usr/bin/python3 "$@"
+EOF
+chmod +x "$rollback_exchange_python"
+sed -i \
+  's|/usr/bin/python3 -I -S - "$staged_dist" "$dist_dir"|'\
+"$rollback_exchange_python"' -I -S - "$staged_dist" "$dist_dir"|' \
+  "$rollback_exchange_repo/scripts/package-release.sh"
+retag_package_repo "$rollback_exchange_repo" v1.0.0
+if FAKE_CORRUPT_AFTER_EXCHANGE=1 \
+  FAKE_EXCHANGE_COUNT="$package_tmp/rollback-exchange-count" \
+  "$rollback_exchange_repo/scripts/package-release.sh" v1.0.0 \
+  >"$package_tmp/rollback-exchange-output" \
+  2>"$package_tmp/rollback-exchange-error"; then
+  fail 'packager accepted a failed rollback exchange'
+fi
+grep -Fq 'Release rollback could not be confirmed' \
+  "$package_tmp/rollback-exchange-error" ||
+  fail 'rollback exchange failure must fail loudly'
+grep -Fq 'Recovery material retained at:' \
+  "$package_tmp/rollback-exchange-error" ||
+  fail 'rollback exchange failure must report its exact recovery path'
+grep -Fq 'Do not delete this directory' \
+  "$package_tmp/rollback-exchange-error" ||
+  fail 'rollback exchange failure must provide preservation instructions'
+rollback_exchange_recovery=$(sed -n \
+  's/^Recovery material retained at: //p' \
+  "$package_tmp/rollback-exchange-error" | tail -1)
+[[ -d $rollback_exchange_recovery &&
+   -f $rollback_exchange_recovery/RECOVERY_REQUIRED ]] ||
+  fail 'rollback exchange failure must retain marked bounded recovery material'
+[[ ! -s $package_tmp/rollback-exchange-output ]] ||
+  fail 'failed rollback exchange must not print success paths'
+
+rollback_verify_repo="$package_tmp/rollback-verification-failure-repo"
+init_package_repo "$rollback_verify_repo" v1.0.0
+inject_post_exchange_corruption "$rollback_verify_repo"
+sed -i \
+  '/^verify_prior_dist() {$/a \  [[ ${FAKE_ROLLBACK_VERIFY_FAIL:-0} != 1 ]] || return 1' \
+  "$rollback_verify_repo/scripts/package-release.sh"
+retag_package_repo "$rollback_verify_repo" v1.0.0
+grep -Fq 'FAKE_ROLLBACK_VERIFY_FAIL' \
+  "$rollback_verify_repo/scripts/package-release.sh" ||
+  fail 'rollback verification fault was not injected'
+if FAKE_CORRUPT_AFTER_EXCHANGE=1 FAKE_ROLLBACK_VERIFY_FAIL=1 \
+  "$rollback_verify_repo/scripts/package-release.sh" v1.0.0 \
+  >"$package_tmp/rollback-verify-output" \
+  2>"$package_tmp/rollback-verify-error"; then
+  fail 'packager accepted an unconfirmed rollback verification'
+fi
+grep -Fq 'Release rollback could not be confirmed' \
+  "$package_tmp/rollback-verify-error" ||
+  fail 'rollback verification failure must fail loudly'
+rollback_verify_recovery=$(sed -n \
+  's/^Recovery material retained at: //p' \
+  "$package_tmp/rollback-verify-error" | tail -1)
+[[ -d $rollback_verify_recovery &&
+   -f $rollback_verify_recovery/RECOVERY_REQUIRED ]] ||
+  fail 'rollback verification failure must retain marked recovery material'
+[[ ! -s $package_tmp/rollback-verify-output ]] ||
+  fail 'unconfirmed rollback verification must not print success paths'
+if "$rollback_verify_repo/scripts/package-release.sh" v1.0.0 \
+  >/dev/null 2>"$package_tmp/retained-recovery-error"; then
+  fail 'automatic recovery must not delete explicitly retained material'
+fi
+grep -Fq "$rollback_verify_recovery" "$package_tmp/retained-recovery-error" ||
+  fail 'later runs must report the retained recovery path without deleting it'
+[[ -d $rollback_verify_recovery &&
+   -f $rollback_verify_recovery/RECOVERY_REQUIRED ]] ||
+  fail 'later runs must preserve unconfirmed recovery material'
 
 dirty_tracked_repo="$package_tmp/dirty-tracked-repo"
 init_package_repo "$dirty_tracked_repo" v1.0.0

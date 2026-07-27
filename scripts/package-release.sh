@@ -89,6 +89,14 @@ recover_staging_root() {
       printf 'Release staging residue is unsafe: %s\n' "$entry" >&2
       return 1
     }
+    if [[ -e $entry/RECOVERY_REQUIRED ||
+          -L $entry/RECOVERY_REQUIRED ]]; then
+      printf 'Retained release recovery requires manual review: %s\n' \
+        "$entry" >&2
+      printf 'Do not delete this directory until dist and its recovery copy are verified.\n' \
+        >&2
+      return 1
+    fi
     metadata_output=$(
       /usr/bin/find -P "$entry" -xdev \
         -exec /usr/bin/stat -c '%d:%u' -- {} \;
@@ -123,12 +131,14 @@ staged_dist="$stage/dist"
 stage_archive="$generated/$archive_name"
 stage_checksum="$generated/$checksum_name"
 /usr/bin/mkdir -m 0700 -- "$generated"
+retain_stage=0
 
 cleanup() {
   local status=$?
   trap - EXIT HUP INT TERM
 
-  if [[ -n ${stage:-} &&
+  if [[ ${retain_stage:-0} == 0 &&
+        -n ${stage:-} &&
         $stage == "$staging_root"/package-"$version".?????? &&
         -d $stage &&
         ! -L $stage ]]; then
@@ -179,6 +189,85 @@ PY
   )
 }
 
+directory_identity() {
+  /usr/bin/stat -c '%d:%i' -- "$1"
+}
+
+dist_tree_digest() {
+  (
+    unset PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONINSPECT PYTHONUSERBASE \
+      PYTHONWARNINGS PYTHONBREAKPOINT PYTHONSAFEPATH
+    cd /
+    /usr/bin/python3 -I -S - "$1" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+
+root = os.fsencode(os.path.abspath(sys.argv[1]))
+root_stat = os.lstat(root)
+digest = hashlib.sha256()
+
+def field(value):
+    if isinstance(value, str):
+        value = os.fsencode(value)
+    if isinstance(value, int):
+        value = str(value).encode("ascii")
+    digest.update(str(len(value)).encode("ascii") + b":" + value)
+
+def visit(path, relative):
+    entries = sorted(os.scandir(path), key=lambda item: item.name)
+    for entry in entries:
+        entry_path = os.path.join(path, entry.name)
+        entry_relative = os.path.join(relative, entry.name)
+        metadata = entry.stat(follow_symlinks=False)
+        if metadata.st_dev != root_stat.st_dev:
+            raise RuntimeError("dist tree crosses filesystems")
+        mode_type = stat.S_IFMT(metadata.st_mode)
+        field(entry_relative)
+        field(mode_type)
+        field(stat.S_IMODE(metadata.st_mode))
+        field(metadata.st_uid)
+        field(metadata.st_gid)
+        if stat.S_ISDIR(metadata.st_mode):
+            visit(entry_path, entry_relative)
+        elif stat.S_ISREG(metadata.st_mode):
+            field(metadata.st_size)
+            with open(entry_path, "rb") as stream:
+                while True:
+                    chunk = stream.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+        elif stat.S_ISLNK(metadata.st_mode):
+            field(os.readlink(entry_path))
+        else:
+            raise RuntimeError("unsupported entry in dist tree")
+
+field(stat.S_IMODE(root_stat.st_mode))
+field(root_stat.st_uid)
+field(root_stat.st_gid)
+visit(root, b"")
+print(digest.hexdigest())
+PY
+  )
+}
+
+publication_exchange_state() {
+  local public_identity staged_identity
+  public_identity=$(directory_identity "$dist_dir") || return 1
+  staged_identity=$(directory_identity "$staged_dist") || return 1
+  if [[ $public_identity == "$candidate_dist_identity" &&
+        $staged_identity == "$prior_dist_identity" ]]; then
+    printf 'exchanged\n'
+  elif [[ $public_identity == "$prior_dist_identity" &&
+          $staged_identity == "$candidate_dist_identity" ]]; then
+    printf 'not-exchanged\n'
+  else
+    printf 'unknown\n'
+  fi
+}
+
 verify_published_pair() {
   [[ -f $archive && ! -L $archive &&
      -f $checksum && ! -L $checksum ]] || return 1
@@ -186,6 +275,24 @@ verify_published_pair() {
     return 1
   cmp -s -- "$archive" "$stage_archive" &&
     cmp -s -- "$checksum" "$stage_checksum"
+}
+
+verify_prior_dist() {
+  [[ $(directory_identity "$dist_dir") == "$prior_dist_identity" &&
+     $(directory_identity "$staged_dist") == "$candidate_dist_identity" ]] ||
+    return 1
+  [[ $(dist_tree_digest "$dist_dir") == "$prior_dist_digest" ]]
+}
+
+retain_publication_recovery() {
+  retain_stage=1
+  if ! : >"$stage/RECOVERY_REQUIRED"; then
+    printf 'WARNING: unable to mark retained recovery directory\n' >&2
+  fi
+  printf 'Release rollback could not be confirmed: %s\n' "$version" >&2
+  printf 'Recovery material retained at: %s\n' "$stage" >&2
+  printf 'Do not delete this directory. Inspect dist and %s/dist before any manual recovery.\n' \
+    "$stage" >&2
 }
 
 trap cleanup EXIT
@@ -227,15 +334,36 @@ if [[ -e $archive || -e $checksum ]]; then
   exit 1
 fi
 
+prior_dist_identity=$(directory_identity "$dist_dir")
+prior_dist_digest=$(dist_tree_digest "$dist_dir")
 mkdir -p "$staged_dist"
 cp -a -- "$dist_dir/." "$staged_dist/"
 cp -- "$stage_archive" "$staged_dist/$archive_name"
 cp -- "$stage_checksum" "$staged_dist/$checksum_name"
 (cd "$staged_dist" && sha256sum -c "$checksum_name") >/dev/null
+candidate_dist_identity=$(directory_identity "$staged_dist")
 publish_dist_exchange
-verify_published_pair || {
-  printf 'Published release pair failed verification: %s\n' "$version" >&2
-  exit 1
-}
+exchange_state=$(publication_exchange_state)
+if [[ $exchange_state == exchanged ]] && verify_published_pair; then
+  printf '%s\n%s\n' "$archive" "$checksum"
+  exit 0
+fi
 
-printf '%s\n%s\n' "$archive" "$checksum"
+if [[ $exchange_state == exchanged ]]; then
+  if publish_dist_exchange && verify_prior_dist; then
+    printf 'Published release pair failed verification and was rolled back: %s\n' \
+      "$version" >&2
+    exit 1
+  fi
+  retain_publication_recovery
+  exit 1
+fi
+
+if [[ $exchange_state == not-exchanged ]]; then
+  printf 'Published release pair failed verification; no exchange occurred: %s\n' \
+    "$version" >&2
+  exit 1
+fi
+
+retain_publication_recovery
+exit 1
