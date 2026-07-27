@@ -162,6 +162,11 @@ apply_patch_fake "$fake_bin/systemctl" \
   '  is-enabled) [[ -f "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/enabled" ]] ;;' \
   '  is-active) [[ -f "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/active" ]] ;;' \
   '  enable)' \
+  '    if [[ ${!#} == remote-chrome-backup.timer ]]; then' \
+  '      [[ -f "$REMOTE_CHROME_CONFIG_ROOT/active-version" ]] || exit 96' \
+  '      [[ -f "$REMOTE_CHROME_CONFIG_ROOT/previous-version" ]] || exit 96' \
+  '      [[ ${REMOTE_CHROME_FAKE_TIMER_FAIL:-0} != 1 ]] || exit 97' \
+  '    fi' \
   '    [[ ${!#} == remote-chrome-backup.timer ]] || touch "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/enabled"' \
   '    if [[ " $* " == *" --now "* && ${!#} == remote-chrome.service ]]; then' \
   '      touch "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/active"' \
@@ -448,6 +453,8 @@ make_release() {
 setup_activation_fixture() {
   local root=$1
   mkdir -p "$root"
+  mkdir -p "$root/usr/bin"
+  cp "$fake_bin"/* "$root/usr/bin/"
   REMOTE_CHROME_TEST_ROOT=$root
   vm_init_paths
   export REMOTE_CHROME_TEST_ROOT REMOTE_CHROME_INSTALL_ROOT \
@@ -543,7 +550,7 @@ done
 assert_order "$REMOTE_CHROME_TRANSITION_LOG" \
   release-installed candidate-config-written compose-config-validated \
   current-switched config-installed service-reloaded service-started \
-  health-verified public-verified active-recorded
+  health-verified public-verified active-recorded backup-timer-configured
 assert_order "$fake_log" \
   "docker <compose> <-f> <$REMOTE_CHROME_INSTALL_ROOT/releases/v2.0.0/compose.yaml> <-f> <$REMOTE_CHROME_INSTALL_ROOT/releases/v2.0.0/vminstall/compose.vm.yaml> <--env-file> <$REMOTE_CHROME_CONFIG_ROOT/compose.env.candidate> <config> <--quiet>" \
   "systemctl <daemon-reload>" \
@@ -615,6 +622,19 @@ done
   fail 'activation stdout leaked the bearer token'
 ! grep -Fq -- "$installed_token" "$success_root/stderr" 2>/dev/null ||
   fail 'activation stderr leaked the bearer token'
+
+timer_failure_root="$test_root/timer-activation-failure"
+setup_activation_fixture "$timer_failure_root"
+export REMOTE_CHROME_FAKE_TIMER_FAIL=1
+set +e
+vm_activate_release >"$timer_failure_root/stdout" 2>"$timer_failure_root/stderr"
+timer_failure_status=$?
+set -e
+unset REMOTE_CHROME_FAKE_TIMER_FAIL
+[[ $timer_failure_status -ne 0 &&
+   $(readlink "$REMOTE_CHROME_INSTALL_ROOT/current") == releases/v1.0.0 &&
+   $(<"$REMOTE_CHROME_CONFIG_ROOT/active-version") == v1.0.0 ]] ||
+  fail 'post-commit timer activation failure must roll release activation back'
 
 # Exit 28 is acceptable only after a captured 101 handshake, and unrelated
 # curl failures remain fatal even if a 101 header was written.
@@ -985,6 +1005,44 @@ REMOTE_CHROME_EXPECT_PASSWORD="$REMOTE_CHROME_EXPECT_PASSWORD" \
 grep -Fxq 'Login URL: https://chrome.example.com/login/' \
   "$cli_root/source-boundary.stdout" ||
   fail 'installed CLI must source libraries beneath its own trusted prefix'
+
+poison_bin="$test_root/poison-bin"
+poison_canary="$test_root/poison-canary"
+mkdir "$poison_bin"
+for poison_tool in tar openssl awk sha256sum docker gcloud; do
+  cat >"$poison_bin/$poison_tool" <<EOF
+#!/bin/sh
+touch "$poison_canary"
+exit 99
+EOF
+  chmod +x "$poison_bin/$poison_tool"
+done
+cat >"$test_root/poison-bash-env" <<EOF
+touch "$poison_canary"
+EOF
+PATH="$poison_bin:/usr/bin:/bin" \
+BASH_ENV="$test_root/poison-bash-env" \
+ENV="$test_root/poison-bash-env" \
+TAR_OPTIONS="--checkpoint-action=exec=touch=$poison_canary" \
+OPENSSL_CONF="$test_root/missing-openssl.cnf" \
+OPENSSL_ENGINES="$poison_bin" \
+DOCKER_HOST="tcp://attacker.invalid:2375" \
+DOCKER_CLI_PLUGIN_EXTRA_DIRS="$poison_bin" \
+COMPOSE_FILE="$test_root/attacker-compose.yaml" \
+CLOUDSDK_CONFIG="$test_root/attacker-gcloud" \
+CLOUDSDK_PYTHON="$poison_bin/python" \
+CLOUDSDK_PYTHON_ARGS="-c touch $poison_canary" \
+PYTHONPATH="$poison_bin" \
+PYTHONHOME="$test_root/attacker-python" \
+STORAGE_EMULATOR_HOST="http://attacker.invalid" \
+HOME="$test_root/attacker-home" \
+XDG_CONFIG_HOME="$test_root/attacker-xdg-config" \
+XDG_CACHE_HOME="$test_root/attacker-xdg-cache" \
+REMOTE_CHROME_TEST_EUID=0 \
+  "$cli_root/usr/local/sbin/remote-chrome" status >"$cli_root/poison.stdout" \
+    2>"$cli_root/poison.stderr"
+[[ ! -e $poison_canary ]] ||
+  fail 'installed root CLI must ignore caller-selected programs and control environment'
 
 set +e
 run_cli "$cli_root" >"$cli_root/no-args.stdout" \

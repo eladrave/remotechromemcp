@@ -384,12 +384,6 @@ vm_install_candidate_config() {
       vm_write_managed_file "$backup_destination" 0644 <"$backup_candidate" ||
         return 1
     done
-  else
-    vm_run_bounded systemctl disable --now remote-chrome-backup.timer \
-      >/dev/null 2>&1 || true
-    rm -f -- \
-      "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome-backup.service" \
-      "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome-backup.timer"
   fi
 
   local cli_candidate="$REMOTE_CHROME_INSTALL_ROOT/releases/$SELECTED_VERSION/vminstall/remote-chrome"
@@ -479,8 +473,17 @@ vm_activate_backup_timer() {
   if [[ -n ${BACKUP_SCHEDULE:-} ]]; then
     vm_run_bounded systemctl enable --now remote-chrome-backup.timer
   else
-    vm_run_bounded systemctl disable --now remote-chrome-backup.timer \
-      >/dev/null 2>&1 || true
+    if [[ -e $REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome-backup.service ||
+          -e $REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome-backup.timer ]] ||
+       vm_run_bounded systemctl is-enabled --quiet remote-chrome-backup.timer ||
+       vm_run_bounded systemctl is-active --quiet remote-chrome-backup.timer; then
+      vm_run_bounded systemctl disable --now remote-chrome-backup.timer ||
+        return 1
+    fi
+    rm -f -- \
+      "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome-backup.service" \
+      "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome-backup.timer" || return 1
+    vm_run_bounded systemctl daemon-reload
   fi
 }
 
@@ -579,8 +582,6 @@ vm_activate_release() {
      vm_activation_transition service-reloaded &&
      vm_run_bounded systemctl enable --now remote-chrome.service &&
      vm_activation_transition service-started &&
-     vm_activate_backup_timer &&
-     vm_activation_transition backup-timer-configured &&
      vm_activation_transition health-verified &&
      vm_activation_transition public-verified &&
      { if [[ -n $previous_target ]]; then
@@ -594,7 +595,9 @@ vm_activate_release() {
        fi; } &&
      printf '%s\n' "$SELECTED_VERSION" |
        vm_write_secret_file "$REMOTE_CHROME_CONFIG_ROOT/active-version" &&
-     vm_activation_transition active-recorded; then
+     vm_activation_transition active-recorded &&
+     vm_activate_backup_timer &&
+     vm_activation_transition backup-timer-configured; then
     result=0
   fi
 

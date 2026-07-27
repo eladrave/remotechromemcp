@@ -53,6 +53,16 @@ vm_backup_gcloud_path() {
   printf '%s' "$command"
 }
 
+vm_backup_trusted_tool() {
+  local name=$1 command
+  command="/usr/bin/$name"
+  if [[ -n ${REMOTE_CHROME_CANONICAL_TEST_ROOT:-} ]]; then
+    command="$REMOTE_CHROME_CANONICAL_TEST_ROOT/usr/bin/$name"
+  fi
+  [[ -f $command && ! -L $command && -x $command ]] || return 69
+  printf '%s' "$command"
+}
+
 vm_backup_gcloud_cp() {
   local source=$1 destination=$2 command
   command=$(vm_backup_gcloud_path) || return $?
@@ -60,7 +70,9 @@ vm_backup_gcloud_cp() {
 }
 
 vm_backup_unique_suffix() {
-  vm_run_bounded openssl rand -hex 6
+  local openssl
+  openssl=$(vm_backup_trusted_tool openssl) || return $?
+  vm_run_bounded "$openssl" rand -hex 6
 }
 
 vm_backup_health() {
@@ -131,11 +143,13 @@ vm_with_maintenance_lock() {
 
 vm_backup_profile_locked() (
   local prefix=$1 release timestamp suffix base stage archive checksum manifest
-  local chrome_version status=0 restart_required=0
+  local chrome_version status=0 restart_required=0 tar_command sha_command
   vm_backup_validate_gcs_uri "$prefix" || return $?
   [[ -d $REMOTE_CHROME_DATA_DIR/profile &&
      ! -L $REMOTE_CHROME_DATA_DIR/profile ]] || return 66
   release=$(vm_backup_release_path) || return 69
+  tar_command=$(vm_backup_trusted_tool tar) || return $?
+  sha_command=$(vm_backup_trusted_tool sha256sum) || return $?
   timestamp=$(date -u +%Y%m%dT%H%M%SZ) || return 1
   suffix=$(vm_backup_unique_suffix) || return $?
   [[ $suffix =~ ^[0-9a-f]{12}$ ]] || return 1
@@ -172,11 +186,11 @@ vm_backup_profile_locked() (
   [[ -n $chrome_version &&
      $chrome_version != *$'\n'* &&
      $chrome_version != *$'\r'* ]] || return 1
-  vm_backup_stop_browser "$release" || return $?
   restart_required=1
+  vm_backup_stop_browser "$release" || return $?
 
   vm_backup_event tar || return 1
-  vm_run_bounded tar --create --gzip --file "$archive" \
+  vm_run_bounded "$tar_command" --create --gzip --file "$archive" \
     --numeric-owner --one-file-system \
     --directory "$REMOTE_CHROME_DATA_DIR" profile || return $?
   chmod 0600 "$archive" || return 1
@@ -184,7 +198,7 @@ vm_backup_profile_locked() (
   vm_backup_event checksum || return 1
   (
     cd "$stage"
-    vm_run_bounded sha256sum "$base.tar.gz" >"$base.sha256"
+    vm_run_bounded "$sha_command" "$base.tar.gz" >"$base.sha256"
   ) || return $?
   chmod 0600 "$checksum" || return 1
   printf '%s\n' \
@@ -215,12 +229,13 @@ vm_backup_profile() {
 }
 
 vm_validate_backup_archive() {
-  local archive=$1 member type
+  local archive=$1 member type tar_command
   local names="$archive.names.$$" listing="$archive.listing.$$" status=0
   [[ -f $archive && ! -L $archive ]] || return 1
+  tar_command=$(vm_backup_trusted_tool tar) || return $?
   vm_require_management_destination "$names" || return 64
   vm_require_management_destination "$listing" || return 64
-  if ! vm_run_bounded tar -tzf "$archive" >"$names"; then
+  if ! vm_run_bounded "$tar_command" -tzf "$archive" >"$names"; then
     rm -f -- "$names" "$listing"
     return 1
   fi
@@ -246,7 +261,7 @@ vm_validate_backup_archive() {
     ((status == 0)) || break
   done <"$names"
   if ((status == 0)); then
-    if ! vm_run_bounded tar -tvzf "$archive" >"$listing"; then
+    if ! vm_run_bounded "$tar_command" -tvzf "$archive" >"$listing"; then
       status=1
     else
       while IFS= read -r type; do
@@ -292,6 +307,8 @@ vm_parse_backup_manifest() {
 vm_verify_backup_checksum() {
   local directory=$1 archive_name=$2 checksum_name=$3
   local checksum_line expected actual output="$directory/.checksum.$$"
+  local sha_command
+  sha_command=$(vm_backup_trusted_tool sha256sum) || return $?
   vm_require_management_destination "$output" || return 64
   [[ -f $directory/$checksum_name &&
      ! -L $directory/$checksum_name ]] || return 1
@@ -304,7 +321,7 @@ vm_verify_backup_checksum() {
   [[ ${BASH_REMATCH[2]} == "$archive_name" ]] || return 1
   if ! (
     cd "$directory"
-    vm_run_bounded sha256sum "$archive_name"
+    vm_run_bounded "$sha_command" "$archive_name"
   ) >"$output"; then
     rm -f -- "$output"
     return 1
@@ -319,11 +336,17 @@ vm_verify_backup_checksum() {
 
 vm_restore_profile_locked() (
   local manifest_uri=$1 release timestamp suffix restore_root archive checksum
+  local requested_manifest requested_identity requested_timestamp
   local manifest new_profile rollback failed status=0 preserved=0 completed=0
   local restart_required=0
-  local profile_owner profile_mode
+  local profile_owner profile_mode tar_command chown_command
   vm_backup_validate_gcs_uri "$manifest_uri" || return $?
   [[ $manifest_uri == *.manifest ]] || return 64
+  requested_manifest=${manifest_uri##*/}
+  [[ $requested_manifest =~ ^(remote-chrome-profile-([0-9]{8}T[0-9]{6}Z)-[0-9a-f]{12})\.manifest$ ]] ||
+    return 64
+  requested_identity=${BASH_REMATCH[1]}
+  requested_timestamp=${BASH_REMATCH[2]}
   [[ -d $REMOTE_CHROME_DATA_DIR/profile &&
      ! -L $REMOTE_CHROME_DATA_DIR/profile ]] || return 66
   profile_owner=$(stat -c '%u:%g' "$REMOTE_CHROME_DATA_DIR/profile") ||
@@ -333,11 +356,13 @@ vm_restore_profile_locked() (
   [[ $profile_owner =~ ^[0-9]+:[0-9]+$ &&
      $profile_mode =~ ^[0-7]{3,4}$ ]] || return 1
   release=$(vm_backup_release_path) || return 69
+  tar_command=$(vm_backup_trusted_tool tar) || return $?
+  chown_command=$(vm_backup_trusted_tool chown) || return $?
   timestamp=$(date -u +%Y%m%dT%H%M%SZ) || return 1
   suffix=$(vm_backup_unique_suffix) || return $?
   [[ $suffix =~ ^[0-9a-f]{12}$ ]] || return 1
   restore_root="$REMOTE_CHROME_DATA_DIR/restore-staging/restore-$timestamp-$suffix.$$"
-  manifest="$restore_root/$(basename "$manifest_uri")"
+  manifest="$restore_root/$requested_manifest"
   new_profile="$restore_root/profile-new"
   rollback="$REMOTE_CHROME_DATA_DIR/profile.rollback-$timestamp-$suffix"
   failed="$REMOTE_CHROME_DATA_DIR/profile.failed-$timestamp-$suffix"
@@ -354,7 +379,16 @@ vm_restore_profile_locked() (
     trap - EXIT
     if ((preserved && ! completed)); then
       local rollback_confirmed=1
-      vm_backup_stop_browser "$release" || rollback_confirmed=0
+      if ! vm_backup_stop_browser "$release"; then
+        printf '%s\n' \
+          'ERROR: rollback stop could not be confirmed; recovery retained:' \
+          "  current profile: $REMOTE_CHROME_DATA_DIR/profile" \
+          "  rollback profile: $rollback" \
+          "  restore staging: $restore_root" >&2
+        vm_backup_start_browser "$release" || true
+        vm_backup_health health || true
+        exit 70
+      fi
       if [[ -e $REMOTE_CHROME_DATA_DIR/profile ||
             -L $REMOTE_CHROME_DATA_DIR/profile ]]; then
         mv -- "$REMOTE_CHROME_DATA_DIR/profile" "$failed" ||
@@ -388,6 +422,9 @@ vm_restore_profile_locked() (
   vm_backup_event download || return 1
   vm_backup_gcloud_cp "$manifest_uri" "$manifest" || return $?
   vm_parse_backup_manifest "$manifest" || return 1
+  [[ $VM_BACKUP_TIMESTAMP == "$requested_timestamp" &&
+     $VM_BACKUP_ARCHIVE_NAME == "$requested_identity.tar.gz" &&
+     $VM_BACKUP_CHECKSUM_NAME == "$requested_identity.sha256" ]] || return 1
   archive="$restore_root/$VM_BACKUP_ARCHIVE_NAME"
   checksum="$restore_root/$VM_BACKUP_CHECKSUM_NAME"
   local object_prefix=${manifest_uri%/*}
@@ -410,19 +447,20 @@ vm_restore_profile_locked() (
   preserved=1
   install -d -m 0700 "$new_profile" || return 1
   vm_backup_event extract || return 1
-  vm_run_bounded tar --extract --gzip --file "$archive" \
+  vm_run_bounded "$tar_command" --extract --gzip --file "$archive" \
     --directory "$new_profile" --strip-components=1 \
     --no-same-owner --no-same-permissions || return $?
   chmod "$profile_mode" "$new_profile" || return 1
   vm_backup_event chown || return 1
-  vm_run_bounded chown -R "$profile_owner" "$new_profile" || return $?
+  vm_run_bounded "$chown_command" -R "$profile_owner" "$new_profile" || return $?
   mv -- "$new_profile" "$REMOTE_CHROME_DATA_DIR/profile" || return 1
   vm_backup_start_browser "$release" || return $?
   vm_backup_health health || return $?
   restart_required=0
 
-  rm -rf -- "$rollback" "$restore_root"
   completed=1
+  rm -rf -- "$restore_root" || return $?
+  rm -rf -- "$rollback" || return $?
   return 0
 )
 

@@ -13,6 +13,7 @@ required_tests=(
   backup_stops_browser_before_tar
   backup_uploads_archive_checksum_manifest
   backup_upload_failure_restarts_stack
+  backup_partial_stop_failure_restarts_browser
   backup_health_failure_returns_nonzero
   backup_lock_rejects_concurrency
   backup_rejects_invalid_gcs_prefix
@@ -23,8 +24,12 @@ required_tests=(
   restore_rejects_escaping_symlink
   restore_preserves_current_profile
   restore_health_failure_rolls_back
+  restore_unconfirmed_rollback_stop_preserves_all
+  restore_cleanup_failure_keeps_healthy_profile_and_rollback
+  restore_rejects_mismatched_identity
   restore_success_removes_staging_only
   backup_timer_lifecycle_follows_schedule
+  backup_timer_empty_schedule_without_prior_succeeds
   backup_timer_rollback_restores_prior_state
   management_dispatch_uses_backup_contract
 )
@@ -52,6 +57,14 @@ case "$*" in
     rm -f "$FAKE_BROWSER_STOPPED"
     ;;
   *" ps --status running --services browser")
+    count=0
+    [[ ! -f ${FAKE_PS_COUNT:-} ]] || count=$(<"$FAKE_PS_COUNT")
+    count=$((count + 1))
+    [[ -z ${FAKE_PS_COUNT:-} ]] || printf '%s\n' "$count" >"$FAKE_PS_COUNT"
+    if [[ ${FAKE_PS_HANG_ON:-0} -eq $count ]]; then
+      exec /bin/sleep 30
+    fi
+    [[ ${FAKE_PS_FAIL_ON:-0} -ne $count ]] || exit 92
     [[ -e $FAKE_BROWSER_STOPPED ]] || printf 'browser\n'
     ;;
   *" exec -T browser google-chrome --version")
@@ -91,6 +104,20 @@ cat >"$fake_bin/systemctl" <<'FAKE'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'systemctl <%s>\n' "$*" >>"$FAKE_COMMAND_LOG"
+[[ ${1:-} != is-enabled && ${1:-} != is-active ]] || exit 1
+if [[ ${FAKE_SYSTEMCTL_DISABLE_ABSENT:-0} == 1 &&
+      ${1:-} == disable &&
+      ! -e $REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome-backup.timer ]]; then
+  exit 5
+fi
+FAKE
+cat >"$fake_bin/rm" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ ${FAKE_RM_FAIL_RESTORE:-0} == 1 && " $* " == *"/restore-staging/"* ]]; then
+  exit 99
+fi
+exec /usr/bin/rm "$@"
 FAKE
 chmod +x "$fake_bin"/*
 export PATH="$fake_bin:$PATH"
@@ -140,6 +167,8 @@ setup_fixture() {
   cp compose.yaml "$fixture_root/opt/remotechromemcp/releases/v1.0.0/compose.yaml"
   cp vminstall/compose.vm.yaml \
     "$fixture_root/opt/remotechromemcp/releases/v1.0.0/vminstall/compose.vm.yaml"
+  cp "$fake_bin/tar" "$fake_bin/sha256sum" "$fake_bin/openssl" \
+    "$fake_bin/chown" "$fixture_root/usr/bin/"
   printf 'old-profile\n' \
     >"$fixture_root/var/lib/remote-chrome/profile/current-marker"
   chmod 0700 "$fixture_root/var/lib/remote-chrome/profile"
@@ -213,7 +242,9 @@ FAKE
   export FAKE_GCS_ROOT="$fixture_root/gcs"
   export FAKE_HEALTH_COUNT="$fixture_root/health.count"
   export FAKE_UPLOAD_COUNT="$fixture_root/upload.count"
+  export FAKE_PS_COUNT="$fixture_root/ps.count"
   unset FAKE_GCLOUD_FAIL_UPLOAD FAKE_HEALTH_FAIL_ON KEEP_LOCAL_BACKUPS
+  unset FAKE_PS_FAIL_ON FAKE_PS_HANG_ON FAKE_RM_FAIL_RESTORE
   : >"$REMOTE_CHROME_BACKUP_LOG"
   : >"$FAKE_COMMAND_LOG"
 }
@@ -318,6 +349,19 @@ backup_upload_failure_restarts_stack() {
     fail 'upload failure recovery must restart and health-check'
 }
 
+backup_partial_stop_failure_restarts_browser() {
+  setup_fixture "$FUNCNAME"
+  export FAKE_PS_FAIL_ON=1
+  set +e
+  vm_backup_profile gs://fixture-backups/remote-chrome
+  status=$?
+  set -e
+  [[ $status -ne 0 && ! -e $FAKE_BROWSER_STOPPED ]] ||
+    fail 'backup stop-confirmation failure must restart the browser'
+  [[ $(tail -n 2 "$REMOTE_CHROME_BACKUP_LOG") == $'start\nhealth' ]] ||
+    fail 'partial stop failure must restart and health-check'
+}
+
 backup_health_failure_returns_nonzero() {
   setup_fixture "$FUNCNAME"
   export FAKE_HEALTH_FAIL_ON=1
@@ -408,6 +452,81 @@ restore_health_failure_rolls_back() {
     fail 'rollback must leave the old browser running'
 }
 
+restore_unconfirmed_rollback_stop_preserves_all() {
+  setup_fixture "$FUNCNAME"; make_restore_fixture valid
+  export FAKE_HEALTH_FAIL_ON=2
+  export FAKE_PS_FAIL_ON=2
+  set +e
+  vm_restore_profile "$RESTORE_MANIFEST_URI" \
+    >"$fixture_root/restore.stdout" 2>"$fixture_root/restore.stderr"
+  status=$?
+  set -e
+  rollback=$(find "$REMOTE_CHROME_DATA_DIR" -maxdepth 1 \
+    -type d -name 'profile.rollback-*' -print -quit)
+  staging=$(find "$REMOTE_CHROME_DATA_DIR/restore-staging" -mindepth 1 \
+    -maxdepth 1 -type d -print -quit)
+  [[ $status -eq 70 &&
+     -f $REMOTE_CHROME_DATA_DIR/profile/restored-marker &&
+     -n $rollback && -f $rollback/current-marker &&
+     -n $staging ]] ||
+    fail 'unconfirmed rollback stop must retain current, rollback, and staging with status 70'
+  for retained in "$REMOTE_CHROME_DATA_DIR/profile" "$rollback" "$staging"; do
+    grep -Fq -- "$retained" "$fixture_root/restore.stderr" ||
+      fail "unconfirmed rollback must report retained path: $retained"
+  done
+}
+
+restore_cleanup_failure_keeps_healthy_profile_and_rollback() {
+  setup_fixture "$FUNCNAME"; make_restore_fixture valid
+  export FAKE_RM_FAIL_RESTORE=1
+  set +e
+  vm_restore_profile "$RESTORE_MANIFEST_URI"
+  status=$?
+  set -e
+  rollback=$(find "$REMOTE_CHROME_DATA_DIR" -maxdepth 1 \
+    -type d -name 'profile.rollback-*' -print -quit)
+  staging=$(find "$REMOTE_CHROME_DATA_DIR/restore-staging" -mindepth 1 \
+    -maxdepth 1 -type d -print -quit)
+  [[ $status -ne 0 &&
+     -f $REMOTE_CHROME_DATA_DIR/profile/restored-marker &&
+     -n $rollback && -f $rollback/current-marker &&
+     -n $staging ]] ||
+    fail 'cleanup failure must retain healthy profile, rollback, and staging'
+}
+
+restore_rejects_mismatched_identity() {
+  local identity_case object_dir manifest base replacement
+  for identity_case in manifest-name timestamp archive checksum; do
+    setup_fixture "$FUNCNAME-$identity_case"; make_restore_fixture valid
+    object_dir="$FAKE_GCS_ROOT/fixture-backups/remote-chrome"
+    base=remote-chrome-profile-20260727T120000Z-a1b2c3d4e5f6
+    manifest="$object_dir/$base.manifest"
+    case "$identity_case" in
+      manifest-name)
+        replacement=remote-chrome-profile-20260727T120001Z-a1b2c3d4e5f6
+        mv "$manifest" "$object_dir/$replacement.manifest"
+        RESTORE_MANIFEST_URI="gs://fixture-backups/remote-chrome/$replacement.manifest"
+        ;;
+      timestamp)
+        sed -i 's/TIMESTAMP_UTC=20260727T120000Z/TIMESTAMP_UTC=20260727T120001Z/' "$manifest"
+        ;;
+      archive)
+        sed -i 's/ARCHIVE_NAME=.*$/ARCHIVE_NAME=remote-chrome-profile-20260727T120000Z-b1b2c3d4e5f6.tar.gz/' "$manifest"
+        ;;
+      checksum)
+        sed -i 's/CHECKSUM_NAME=.*$/CHECKSUM_NAME=remote-chrome-profile-20260727T120000Z-b1b2c3d4e5f6.sha256/' "$manifest"
+        ;;
+    esac
+    set +e
+    vm_restore_profile "$RESTORE_MANIFEST_URI"
+    status=$?
+    set -e
+    [[ $status -ne 0 &&
+       $(grep -c '^gcloud' "$FAKE_COMMAND_LOG") -eq 1 ]] ||
+      fail "restore must reject mismatched $identity_case identity before pair downloads"
+  done
+}
+
 restore_success_removes_staging_only() {
   setup_fixture "$FUNCNAME"; make_restore_fixture valid
   local expected_owner
@@ -464,10 +583,13 @@ backup_timer_lifecycle_follows_schedule() {
   [[ ! -e $service && ! -e $timer ]] ||
     fail 'empty schedule must not render timer candidates'
   vm_install_candidate_config
+  [[ -e $REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome-backup.service &&
+     -e $REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome-backup.timer ]] ||
+    fail 'schedule removal must retain prior units until activation commits'
+  vm_activate_backup_timer
   [[ ! -e $REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome-backup.service &&
      ! -e $REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome-backup.timer ]] ||
-    fail 'schedule removal must remove both installed backup units'
-  vm_activate_backup_timer
+    fail 'confirmed schedule removal must remove both installed backup units'
   grep -Fq 'systemctl <disable --now remote-chrome-backup.timer>' \
     "$FAKE_COMMAND_LOG" ||
     fail 'removed schedule must disable and stop the prior timer'
@@ -500,6 +622,15 @@ backup_timer_rollback_restores_prior_state() {
   [[ -f $REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome-backup.service &&
      -f $REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome-backup.timer ]] ||
     fail 'activation rollback must restore prior backup unit files'
+}
+
+backup_timer_empty_schedule_without_prior_succeeds() {
+  setup_fixture "$FUNCNAME"
+  BACKUP_SCHEDULE=
+  export FAKE_SYSTEMCTL_DISABLE_ABSENT=1
+  vm_activate_backup_timer ||
+    fail 'empty schedule without a prior timer must be a successful no-op'
+  unset FAKE_SYSTEMCTL_DISABLE_ABSENT
 }
 
 management_dispatch_uses_backup_contract() {
