@@ -53,6 +53,7 @@ vm_verify_public_stack() {
   install -d -m 0700 "$verify_dir" || return 1
 
   local auth_headers="$verify_dir/auth.headers"
+  local basic_headers="$verify_dir/basic.headers"
   local delete_headers="$verify_dir/delete.headers"
   local websocket_headers="$verify_dir/websocket.headers"
   local response_headers="$verify_dir/response.headers"
@@ -67,6 +68,10 @@ vm_verify_public_stack() {
     printf 'Content-Type: application/json\n'
     printf 'Accept: application/json, text/event-stream\n'
   } | vm_write_secret_file "$auth_headers" || result=1
+  {
+    printf 'Authorization: Basic %s\n' \
+      "$(printf '%s:%s' "$LOGIN_USERNAME" "$LOGIN_PASSWORD" | base64 -w0)"
+  } | vm_write_secret_file "$basic_headers" || result=1
   if ((result == 0)); then
     status=$(vm_curl_status "$response_headers" "$response_body" POST \
       --header "@$auth_headers" \
@@ -104,7 +109,7 @@ vm_verify_public_stack() {
   fi
   if ((result == 0)); then
     status=$(vm_curl_status "$empty_headers" "$response_body" GET \
-      "$MCP_URL") || result=1
+      --header "@$auth_headers" "$MCP_URL") || result=1
     [[ $status == 405 ]] || result=1
   fi
   if ((result == 0)); then
@@ -121,24 +126,36 @@ vm_verify_public_stack() {
     [[ $basic_value == yes ]] || result=1
   fi
   if ((result == 0)); then
+    status=$(vm_curl_status "$login_headers" "$response_body" GET \
+      --header "@$basic_headers" "$LOGIN_URL") || result=1
+    [[ $status == 200 ]] || result=1
+    grep -qi 'noVNC' "$response_body" || result=1
+  fi
+  if ((result == 0)); then
     {
       printf 'Authorization: Basic %s\n' \
-        "$(printf '%s:%s' "$LOGIN_USERNAME" "$LOGIN_PASSWORD" | base64)"
+        "$(printf '%s:%s' "$LOGIN_USERNAME" "$LOGIN_PASSWORD" | base64 -w0)"
       printf 'Connection: Upgrade\n'
       printf 'Upgrade: websocket\n'
-      printf 'Sec-WebSocket-Key: cmVtb3RlLWNocm9tZQ==\n'
+      printf 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\n'
       printf 'Sec-WebSocket-Version: 13\n'
     } | vm_write_secret_file "$websocket_headers" || result=1
   fi
   if ((result == 0)); then
     status=$(vm_curl_status "$empty_headers" "$response_body" GET \
+      --http1.1 \
       --header "@$websocket_headers" \
       "https://$DOMAIN/login/websockify") || result=1
     [[ $status == 101 ]] || result=1
+    tr -d '\r' <"$empty_headers" |
+      grep -Eq '^HTTP/[^ ]+ 101([[:space:]]|$)' || result=1
   fi
 
   vm_require_management_destination "$verify_dir" || return 1
   rm -rf -- "$verify_dir"
+  if ((result == 0)); then
+    CERTIFICATE_STATUS="ready (public HTTPS verified for $DOMAIN during activation)"
+  fi
   ((result == 0))
 }
 
@@ -160,11 +177,35 @@ vm_snapshot_activation_state() {
       : >"$snapshot/$name.present"
     fi
   done
+  if [[ -e $REMOTE_CHROME_CLI_ROOT/remote-chrome ||
+        -L $REMOTE_CHROME_CLI_ROOT/remote-chrome ]]; then
+    [[ -f $REMOTE_CHROME_CLI_ROOT/remote-chrome &&
+       ! -L $REMOTE_CHROME_CLI_ROOT/remote-chrome ]] || return 1
+    cp -a -- "$REMOTE_CHROME_CLI_ROOT/remote-chrome" \
+      "$snapshot/remote-chrome.cli" || return 1
+    : >"$snapshot/remote-chrome.cli.present"
+  fi
+  if systemctl is-enabled --quiet remote-chrome.service; then
+    : >"$snapshot/service.enabled"
+  fi
+  if systemctl is-active --quiet remote-chrome.service; then
+    : >"$snapshot/service.active"
+  fi
+}
+
+vm_restore_managed_file() {
+  local snapshot_file=$1 destination=$2 mode=$3
+  vm_require_management_destination "$destination" || return 1
+  if [[ -f $snapshot_file ]]; then
+    vm_write_managed_file "$destination" "$mode" <"$snapshot_file"
+  else
+    rm -f -- "$destination"
+  fi
 }
 
 vm_restore_activation_state() {
   local snapshot=$1
-  local destination name
+  local destination name mode
   for destination in \
     "$REMOTE_CHROME_CONFIG_ROOT/install.env" \
     "$REMOTE_CHROME_CONFIG_ROOT/compose.env" \
@@ -172,23 +213,36 @@ vm_restore_activation_state() {
     "$REMOTE_CHROME_CONFIG_ROOT/active-version" \
     "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome.service"; do
     name=${destination##*/}
-    vm_require_management_destination "$destination" || return 1
+    mode=0600
+    [[ $destination == "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome.service" ]] &&
+      mode=0644
     if [[ -f $snapshot/$name.present ]]; then
-      cp -a -- "$snapshot/$name" "$destination.tmp.$$" || return 1
-      mv -fT -- "$destination.tmp.$$" "$destination" || return 1
+      vm_restore_managed_file "$snapshot/$name" "$destination" "$mode" ||
+        return 1
     else
-      rm -f -- "$destination"
+      vm_restore_managed_file /nonexistent "$destination" "$mode" || return 1
     fi
   done
+  if [[ -f $snapshot/remote-chrome.cli.present ]]; then
+    vm_restore_managed_file "$snapshot/remote-chrome.cli" \
+      "$REMOTE_CHROME_CLI_ROOT/remote-chrome" 0755 || return 1
+  else
+    vm_restore_managed_file /nonexistent \
+      "$REMOTE_CHROME_CLI_ROOT/remote-chrome" 0755 || return 1
+  fi
 }
 
 vm_switch_current() {
   local target=$1
-  local temporary="$REMOTE_CHROME_INSTALL_ROOT/.current.tmp.$$"
+  local temporary
+  vm_require_management_destination "$REMOTE_CHROME_INSTALL_ROOT" || return 1
+  install -d -m 0755 "$REMOTE_CHROME_INSTALL_ROOT" || return 1
+  vm_require_management_destination "$REMOTE_CHROME_INSTALL_ROOT" || return 1
+  temporary=$(
+    mktemp -p "$REMOTE_CHROME_INSTALL_ROOT" '.current.XXXXXXXXXX'
+  ) || return 1
   vm_require_management_destination "$temporary" || return 1
-  vm_require_management_destination "$REMOTE_CHROME_INSTALL_ROOT/current" ||
-    return 1
-  rm -f -- "$temporary"
+  rm -f -- "$temporary" || return 1
   ln -s -- "$target" "$temporary" || return 1
   mv -fT -- "$temporary" "$REMOTE_CHROME_INSTALL_ROOT/current"
 }
@@ -202,13 +256,15 @@ vm_install_candidate_config() {
   done
   local service_candidate="$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome.service.candidate"
   local service_destination="$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome.service"
-  local service_temporary="${service_destination}.tmp.$$"
   [[ -f $service_candidate ]] || return 1
-  vm_require_management_destination "$service_destination" || return 1
-  vm_require_management_destination "$service_temporary" || return 1
-  install -m 0644 "$service_candidate" "$service_temporary" || return 1
-  chown root:root "$service_temporary" || return 1
-  mv -fT -- "$service_temporary" "$service_destination" || return 1
+  vm_write_managed_file "$service_destination" 0644 <"$service_candidate" ||
+    return 1
+
+  local cli_candidate="$REMOTE_CHROME_INSTALL_ROOT/releases/$SELECTED_VERSION/vminstall/remote-chrome"
+  local cli_destination="$REMOTE_CHROME_CLI_ROOT/remote-chrome"
+  [[ -f $cli_candidate && ! -L $cli_candidate && -x $cli_candidate ]] ||
+    return 1
+  vm_write_managed_file "$cli_destination" 0755 <"$cli_candidate"
 }
 
 vm_cleanup_candidate_config() {
@@ -223,29 +279,84 @@ vm_cleanup_candidate_config() {
   done
 }
 
+vm_validate_candidate_compose() {
+  local candidate_release=$1
+  local diagnostic="$REMOTE_CHROME_CONFIG_ROOT/activation-diagnostic.log"
+  local raw status=0
+  vm_require_management_destination "$REMOTE_CHROME_CONFIG_ROOT" || return 1
+  raw=$(mktemp -p "$REMOTE_CHROME_CONFIG_ROOT" \
+    '.compose-validation.XXXXXXXXXX') || return 1
+  vm_require_management_destination "$raw" || return 1
+  chmod 0600 "$raw" || {
+    rm -f -- "$raw"
+    return 1
+  }
+  chown root:root "$raw" || {
+    rm -f -- "$raw"
+    return 1
+  }
+  if ! vm_compose_for_release "$candidate_release" \
+    "$REMOTE_CHROME_CONFIG_ROOT/compose.env.candidate" \
+    config --quiet >"$raw" 2>&1; then
+    status=1
+  fi
+  if ((status == 0)); then
+    printf 'Compose candidate validation passed; raw output suppressed.\n'
+  else
+    printf 'Compose candidate validation failed; raw output suppressed.\n'
+  fi | vm_write_secret_file "$diagnostic" || status=1
+  rm -f -- "$raw"
+  ((status == 0))
+}
+
+vm_stop_candidate_release() {
+  local candidate_release=$1 env_file
+  env_file="$REMOTE_CHROME_CONFIG_ROOT/compose.env.candidate"
+  [[ -f $env_file && ! -L $env_file ]] ||
+    env_file="$REMOTE_CHROME_CONFIG_ROOT/compose.env"
+  if [[ -f $env_file && ! -L $env_file ]]; then
+    vm_compose_for_release "$candidate_release" "$env_file" down \
+      >/dev/null 2>&1
+  fi
+}
+
+vm_remove_candidate_release() {
+  local candidate_release=$1
+  [[ $candidate_release == \
+    "$REMOTE_CHROME_INSTALL_ROOT/releases/$SELECTED_VERSION" ]] || return 1
+  [[ -d $candidate_release && ! -L $candidate_release ]] || return 1
+  vm_require_management_destination "$candidate_release" || return 1
+  rm -rf -- "$candidate_release"
+}
+
 vm_rollback_release() {
   local previous_target=$1 snapshot=$2 candidate_release=$3
-  local rollback_failed=0
-  vm_compose_for_release "$candidate_release" \
-    "$REMOTE_CHROME_CONFIG_ROOT/compose.env" down || rollback_failed=1
+  local rollback_failed=0 prior_health_failed=0
+  vm_stop_candidate_release "$candidate_release" || rollback_failed=1
+  systemctl stop remote-chrome.service || rollback_failed=1
+  systemctl disable remote-chrome.service || rollback_failed=1
 
   if [[ -n $previous_target ]]; then
     vm_switch_current "$previous_target" || rollback_failed=1
   else
-    vm_require_management_destination "$REMOTE_CHROME_INSTALL_ROOT/current" ||
-      rollback_failed=1
     rm -f -- "$REMOTE_CHROME_INSTALL_ROOT/current" || rollback_failed=1
   fi
   vm_restore_activation_state "$snapshot" || rollback_failed=1
   systemctl daemon-reload || rollback_failed=1
 
-  if [[ -n $previous_target ]]; then
+  if [[ -f $snapshot/service.enabled ]]; then
+    systemctl enable remote-chrome.service || rollback_failed=1
+  fi
+  if [[ -f $snapshot/service.active ]]; then
     systemctl start remote-chrome.service || rollback_failed=1
-    if ! REMOTE_CHROME_ROLLBACK=1 \
+    if [[ -z $previous_target ]] || ! REMOTE_CHROME_ROLLBACK=1 \
       vm_wait_stack_health "$REMOTE_CHROME_INSTALL_ROOT/$previous_target"; then
-      printf 'ERROR: rollback health verification failed\n' >&2
-      return 70
+      prior_health_failed=1
     fi
+  fi
+  if ((prior_health_failed == 1)); then
+    printf 'ERROR: rollback health verification failed\n' >&2
+    return 70
   fi
   ((rollback_failed == 0)) || return 1
 }
@@ -255,7 +366,7 @@ vm_activate_release() {
   local previous_target=
   local snapshot="$REMOTE_CHROME_CONFIG_ROOT/.rollback.$$"
   local candidate_release="$REMOTE_CHROME_INSTALL_ROOT/releases/$SELECTED_VERSION"
-  local switched=0 result=1
+  local switched=0 installed_candidate=0 result=1 rollback_status=0
 
   [[ -n ${STAGED_RELEASE_DIR:-} ]] || return 1
   vm_verify_release "$STAGED_RELEASE_DIR" || return 1
@@ -270,14 +381,20 @@ vm_activate_release() {
   vm_snapshot_activation_state "$snapshot" || return 1
   vm_require_management_destination "$candidate_release" || return 1
   [[ ! -e $candidate_release && ! -L $candidate_release ]] || return 1
-  if ! mv -T -- "$STAGED_RELEASE_DIR" "$candidate_release" ||
-     ! vm_activation_transition release-installed ||
+  if ! mv -T -- "$STAGED_RELEASE_DIR" "$candidate_release"; then
+    rm -rf -- "$snapshot"
+    return 1
+  fi
+  installed_candidate=1
+  if ! vm_activation_transition release-installed ||
      ! vm_prepare_config ||
      ! vm_activation_transition candidate-config-written ||
-     ! vm_compose_for_release "$candidate_release" \
-       "$REMOTE_CHROME_CONFIG_ROOT/compose.env.candidate" config ||
+     ! vm_validate_candidate_compose "$candidate_release" ||
      ! vm_activation_transition compose-config-validated; then
+    vm_stop_candidate_release "$candidate_release" || true
     vm_cleanup_candidate_config || true
+    ((installed_candidate == 0)) ||
+      vm_remove_candidate_release "$candidate_release" || true
     rm -rf -- "$snapshot"
     return 1
   fi
@@ -305,19 +422,17 @@ vm_activate_release() {
 
   if ((result != 0)); then
     if ((switched == 1)); then
-      if vm_rollback_release \
-        "$previous_target" "$snapshot" "$candidate_release"; then
-        :
-      else
-        local rollback_status=$?
-        vm_cleanup_candidate_config || true
-        rm -rf -- "$snapshot"
-        [[ $rollback_status -eq 70 ]] && return 70
-        return 1
-      fi
+      vm_rollback_release \
+        "$previous_target" "$snapshot" "$candidate_release" ||
+        rollback_status=$?
+    else
+      vm_stop_candidate_release "$candidate_release" || true
     fi
     vm_cleanup_candidate_config || true
+    ((installed_candidate == 0)) ||
+      vm_remove_candidate_release "$candidate_release" || true
     rm -rf -- "$snapshot"
+    [[ $rollback_status -eq 70 ]] && return 70
     return 1
   fi
 
@@ -346,7 +461,7 @@ vm_print_connection_handoff() {
   [[ -w $tty ]] || return 1
 
   local mcp_url mcp_token compatibility_url login_url username password
-  local data_dir profile
+  local data_dir profile certificate_status
   mcp_url=$(vm_read_env_value "$credentials" MCP_URL) || return 1
   mcp_token=$(vm_read_env_value "$credentials" MCP_TOKEN) || return 1
   compatibility_url=$(
@@ -360,6 +475,8 @@ vm_print_connection_handoff() {
       REMOTE_CHROME_DATA_DIR
   ) || return 1
   profile=$(vm_display_installed_path "$data_dir/profile")
+  certificate_status=${CERTIFICATE_STATUS:-}
+  [[ -n $certificate_status ]] || return 1
 
   {
     printf '%s\n' \
@@ -370,7 +487,7 @@ vm_print_connection_handoff() {
       "Login URL: $login_url" \
       "Login username: $username" \
       "Login password: $password" \
-      'Certificate: HTTPS managed by Caddy (ACME)' \
+      "Certificate: $certificate_status" \
       'Credentials file: /etc/remote-chrome/credentials.env' \
       "Profile: $profile" \
       'Status: sudo remote-chrome status' \
@@ -378,10 +495,13 @@ vm_print_connection_handoff() {
       'Backup: sudo remote-chrome backup' \
       'Restore: sudo remote-chrome restore'
     printf '\nJSON client configuration:\n'
-    printf '{\n  "url": "%s",\n  "headers": {\n' "$mcp_url"
-    printf '    "Authorization": "Bearer %s"\n  }\n}\n' "$mcp_token"
+    printf '{\n  "mcpServers": {\n    "remote_chrome": {\n'
+    printf '      "url": "%s",\n      "headers": {\n' "$mcp_url"
+    printf '        "Authorization": "Bearer %s"\n' "$mcp_token"
+    printf '      }\n    }\n  }\n}\n'
     printf '\nTOML client configuration:\n'
+    printf '[mcp_servers.remote_chrome]\n'
     printf 'url = "%s"\n' "$mcp_url"
-    printf 'authorization = "Bearer %s"\n' "$mcp_token"
+    printf 'headers = { Authorization = "Bearer %s" }\n' "$mcp_token"
   } >>"$tty"
 }

@@ -17,7 +17,9 @@ assert_file_mode_owner() {
     [[ $(stat -c '%U:%G' "$file") == root:root ]] ||
       fail "$file must be root-owned"
   else
-    grep -Fq "chown <root:root> <$file.tmp." "$FAKE_COMMAND_LOG" ||
+    grep -Fq \
+      "chown <root:root> <$(dirname "$file")/.${file##*/}.tmp." \
+      "$FAKE_COMMAND_LOG" ||
       fail "$file must be installed through the root-ownership boundary"
   fi
 }
@@ -53,7 +55,16 @@ assert_order() {
 }
 
 test_root="$(mktemp -d /tmp/remote-chrome-vminstall-management.XXXXXX)"
-trap 'rm -rf "$test_root"' EXIT
+cleanup_test_root() {
+  local status=$?
+  if [[ ${REMOTE_CHROME_KEEP_TEST_ROOT:-0} == 1 && $status -ne 0 ]]; then
+    printf 'DEBUG: preserved test root: %s\n' "$test_root" >&2
+  else
+    rm -rf "$test_root"
+  fi
+  exit "$status"
+}
+trap cleanup_test_root EXIT
 [[ -d $test_root && $test_root == /tmp/* && ! -L $test_root ]] ||
   fail 'management test root must be a real directory beneath /tmp'
 
@@ -98,6 +109,17 @@ apply_patch_fake "$fake_bin/docker" \
   '  IFS= read -r plaintext' \
   '  digest=$(printf "%s" "$plaintext" | sha256sum | cut -c1-53)' \
   '  printf "\0442a\04414\044%s\n" "$digest"' \
+  'elif [[ " $* " == *" compose "*" config"* ]]; then' \
+  '  env_file=' \
+  '  for ((i=1; i<=$#; i++)); do' \
+  '    if [[ ${!i} == --env-file ]]; then j=$((i + 1)); env_file=${!j}; fi' \
+  '  done' \
+  '  token=$(awk -F= '\''$1 == "MCP_TOKEN" { print $2; exit }'\'' "$env_file")' \
+  '  if [[ " $* " != *" config --quiet"* || ${REMOTE_CHROME_FAKE_COMPOSE_CONFIG_FAIL:-0} == 1 ]]; then' \
+  '    printf "rendered MCP_TOKEN=%s\n" "$token"' \
+  '    printf "compose warning MCP_TOKEN=%s\n" "$token" >&2' \
+  '  fi' \
+  '  [[ ${REMOTE_CHROME_FAKE_COMPOSE_CONFIG_FAIL:-0} != 1 ]]' \
   'elif [[ " $* " == *" compose "*" ps "* ]]; then' \
   '  if [[ ${REMOTE_CHROME_ROLLBACK:-0} == 1 && ${REMOTE_CHROME_FAKE_ROLLBACK_UNHEALTHY:-0} == 1 ]]; then' \
   '    printf "browser unhealthy\nproxy healthy\n"' \
@@ -109,7 +131,22 @@ apply_patch_fake "$fake_bin/docker" \
 apply_patch_fake "$fake_bin/systemctl" \
   'printf "systemctl" >>"$FAKE_COMMAND_LOG"' \
   'printf " <%s>" "$@" >>"$FAKE_COMMAND_LOG"' \
-  'printf "\n" >>"$FAKE_COMMAND_LOG"'
+  'printf "\n" >>"$FAKE_COMMAND_LOG"' \
+  'case "${1:-}" in' \
+  '  is-enabled) [[ -f "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/enabled" ]] ;;' \
+  '  is-active) [[ -f "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/active" ]] ;;' \
+  '  enable)' \
+  '    touch "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/enabled"' \
+  '    if [[ " $* " == *" --now "* ]]; then' \
+  '      touch "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/active"' \
+  '      "$REMOTE_CHROME_CLI_ROOT/remote-chrome" wait-ready' \
+  '      [[ ${REMOTE_CHROME_FAKE_SYSTEMCTL_ENABLE_NOW_FAIL:-0} != 1 ]]' \
+  '    fi' \
+  '    ;;' \
+  '  disable) rm -f "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/enabled" ;;' \
+  '  start) touch "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/active" ;;' \
+  '  stop) rm -f "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/active" ;;' \
+  'esac'
 
 apply_patch_fake "$fake_bin/chown" \
   'printf "chown" >>"$FAKE_COMMAND_LOG"' \
@@ -120,30 +157,60 @@ apply_patch_fake "$fake_bin/curl" \
   'printf "curl" >>"$FAKE_COMMAND_LOG"' \
   'printf " <%s>" "$@" >>"$FAKE_COMMAND_LOG"' \
   'printf "\n" >>"$FAKE_COMMAND_LOG"' \
-  'method=GET; headers=; output=; url=' \
+  'method=GET; headers=; output=; url=; header_file=; data=; http1=0' \
   'while (($#)); do' \
   '  case "$1" in' \
-  '    --request) method=$2; shift 2 ;;' \
-  '    --dump-header) headers=$2; shift 2 ;;' \
-  '    --output) output=$2; shift 2 ;;' \
-  '    --header) [[ $2 == @* ]] && cat "${2#@}" >/dev/null; shift 2 ;;' \
+    '    --request) method=$2; shift 2 ;;' \
+    '    --dump-header) headers=$2; shift 2 ;;' \
+    '    --output) output=$2; shift 2 ;;' \
+  '    --header) [[ $2 == @* ]] && header_file=${2#@}; shift 2 ;;' \
+  '    --data-binary) data=$2; shift 2 ;;' \
+  '    --http1.1) http1=1; shift ;;' \
   '    --write-out) shift 2 ;;' \
   '    --*) shift ;;' \
   '    *) url=$1; shift ;;' \
   '  esac' \
   'done' \
-  'status=200' \
+  'auth=; session=; websocket_key=' \
+  'if [[ -n $header_file ]]; then' \
+  '  auth=$(awk -F": " '\''tolower($1) == "authorization" { print $2; exit }'\'' "$header_file" | tr -d "\r")' \
+  '  session=$(awk -F": " '\''tolower($1) == "mcp-session-id" { print $2; exit }'\'' "$header_file" | tr -d "\r")' \
+  '  websocket_key=$(awk -F": " '\''tolower($1) == "sec-websocket-key" { print $2; exit }'\'' "$header_file" | tr -d "\r")' \
+  'fi' \
+  'bearer="Bearer $REMOTE_CHROME_EXPECT_TOKEN"' \
+  'basic="Basic $(printf "%s:%s" "$REMOTE_CHROME_EXPECT_USERNAME" "$REMOTE_CHROME_EXPECT_PASSWORD" | base64 -w0)"' \
+  'status=500; event=invalid' \
   'case "$method:$url" in' \
-  '  POST:*/mcp)' \
-  '    status=200' \
+  '  POST:https://chrome.example.com/mcp)' \
+  '    [[ $auth == "$bearer" && $data == *'\''"method":"initialize"'\''* ]] || exit 91' \
+  '    status=200; event=initialize' \
   '    printf "HTTP/2 200\r\nContent-Type: application/json\r\nMcp-Session-Id: fixture-session\r\n\r\n" >"$headers"' \
   '    printf "{}" >"$output"' \
   '    ;;' \
-  '  DELETE:*/mcp) status=202 ;;' \
-  '  GET:*/mcp) status=405 ;;' \
-  '  GET:*/login/) status=401; printf "HTTP/2 401\r\nWWW-Authenticate: Basic realm=\"Remote Chrome\"\r\n\r\n" >"$headers" ;;' \
-  '  GET:*/login/websockify) status=101 ;;' \
+  '  DELETE:https://chrome.example.com/mcp)' \
+  '    [[ $auth == "$bearer" && $session == fixture-session ]] || exit 92' \
+  '    status=202; event=delete ;;' \
+  '  GET:https://chrome.example.com/mcp)' \
+  '    [[ $auth == "$bearer" ]] || exit 93' \
+  '    status=405; event=get-405 ;;' \
+  '  GET:https://chrome.example.com/login/)' \
+  '    if [[ -z $auth ]]; then' \
+  '      status=401; event=login-401' \
+  '      printf "HTTP/2 401\r\nWWW-Authenticate: Basic realm=\"Remote Chrome\"\r\n\r\n" >"$headers"' \
+  '    else' \
+  '      [[ $auth == "$basic" ]] || exit 94' \
+  '      status=200; event=login-200; printf "<title>noVNC</title>" >"$output"' \
+  '    fi' \
+  '    ;;' \
+  '  GET:https://chrome.example.com/login/websockify)' \
+  '    [[ $auth == "$basic" && $http1 == 1 ]] || exit 95' \
+  '    [[ $(printf "%s" "$websocket_key" | base64 -d 2>/dev/null | wc -c) -eq 16 ]] || exit 96' \
+  '    status=101; event=websocket-101' \
+  '    printf "HTTP/1.1 101 Switching Protocols\r\n\r\n" >"$headers"' \
+  '    ;;' \
+  '  *) exit 97 ;;' \
   'esac' \
+  'printf "%s\n" "$event" >>"$REMOTE_CHROME_PROTOCOL_LOG"' \
   'printf "%s" "$status"'
 
 export PATH="$fake_bin:$PATH"
@@ -219,6 +286,30 @@ grep -Fxq 'PROXY_HTTPS_PORT=443' "$compose_candidate" ||
 grep -Fxq 'PLAYWRIGHT_MCP_VERSION=0.0.78' "$compose_candidate" ||
   fail 'Compose must pin the MCP version'
 
+# Secret replacement must reject every symlinked managed component and must
+# not trust the old predictable .tmp.$$ name.
+secret_attack_root="$REMOTE_CHROME_TEST_ROOT/secret-attacks"
+mkdir -p "$secret_attack_root/managed" "$secret_attack_root/attacker"
+ln -s "$secret_attack_root/attacker" "$secret_attack_root/managed/symlink-parent"
+if printf 'secret\n' |
+  vm_write_secret_file "$secret_attack_root/managed/symlink-parent/value" \
+    2>"$secret_attack_root/symlink-rejection.stderr"; then
+  fail 'secret writer must reject a symlinked parent inside a managed root'
+fi
+[[ ! -e $secret_attack_root/attacker/value ]] ||
+  fail 'symlinked-parent attack must not create an attacker-controlled file'
+predictable_destination="$secret_attack_root/managed/predictable"
+predictable_victim="$secret_attack_root/attacker/victim"
+printf 'unchanged\n' >"$predictable_victim"
+ln -s "$predictable_victim" "${predictable_destination}.tmp.$$"
+printf 'replacement\n' | vm_write_secret_file "$predictable_destination"
+[[ $(<"$predictable_victim") == unchanged ]] ||
+  fail 'precreated predictable temporary symlink must never be followed'
+[[ $(<"$predictable_destination") == replacement ]] ||
+  fail 'secret writer must still atomically install through an unpredictable temporary'
+[[ $(stat -c '%a' "$predictable_destination") == 600 ]] ||
+  fail 'secret writer temporary and destination must be mode 600'
+
 for fixed_service_line in \
   'WorkingDirectory=/opt/remotechromemcp/current' \
   'EnvironmentFile=/etc/remote-chrome/install.env' \
@@ -280,9 +371,15 @@ fi
 make_release() {
   local root=$1 ref=$2
   local release="$root/opt/remotechromemcp/releases/$ref"
-  mkdir -p "$release/vminstall"
+  mkdir -p "$release/vminstall/lib"
   printf 'services: {}\n' >"$release/compose.yaml"
   printf 'services: {}\n' >"$release/vminstall/compose.vm.yaml"
+  if [[ -f vminstall/remote-chrome ]]; then
+    cp vminstall/remote-chrome "$release/vminstall/remote-chrome"
+    chmod +x "$release/vminstall/remote-chrome"
+    cp vminstall/lib/common.sh vminstall/lib/config.sh \
+      vminstall/lib/activate.sh "$release/vminstall/lib/"
+  fi
 }
 
 setup_activation_fixture() {
@@ -290,6 +387,9 @@ setup_activation_fixture() {
   mkdir -p "$root"
   REMOTE_CHROME_TEST_ROOT=$root
   vm_init_paths
+  export REMOTE_CHROME_TEST_ROOT REMOTE_CHROME_INSTALL_ROOT \
+    REMOTE_CHROME_CONFIG_ROOT REMOTE_CHROME_SYSTEMD_ROOT \
+    REMOTE_CHROME_CLI_ROOT
   mkdir -p "$REMOTE_CHROME_INSTALL_ROOT/releases" \
     "$REMOTE_CHROME_CONFIG_ROOT" "$REMOTE_CHROME_SYSTEMD_ROOT"
   make_release "$root" v1.0.0
@@ -311,25 +411,51 @@ setup_activation_fixture() {
   cp "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome.service.candidate" \
     "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome.service"
   printf 'v1.0.0\n' >"$REMOTE_CHROME_CONFIG_ROOT/active-version"
+  install -d -m 0755 "$REMOTE_CHROME_CLI_ROOT"
+  if [[ -f vminstall/remote-chrome ]]; then
+    install -m 0755 vminstall/remote-chrome \
+      "$REMOTE_CHROME_CLI_ROOT/remote-chrome"
+  fi
 
   SELECTED_VERSION=v2.0.0
   STAGED_RELEASE_DIR="$REMOTE_CHROME_INSTALL_ROOT/releases/.staging-v2.0.0-$$"
-  mkdir -p "$STAGED_RELEASE_DIR/vminstall"
+  mkdir -p "$STAGED_RELEASE_DIR/vminstall/lib"
   printf 'services: {}\n' >"$STAGED_RELEASE_DIR/compose.yaml"
   printf 'services: {}\n' >"$STAGED_RELEASE_DIR/vminstall/compose.vm.yaml"
+  if [[ -f vminstall/remote-chrome ]]; then
+    cp vminstall/remote-chrome "$STAGED_RELEASE_DIR/vminstall/remote-chrome"
+    chmod +x "$STAGED_RELEASE_DIR/vminstall/remote-chrome"
+    cp vminstall/lib/common.sh vminstall/lib/config.sh \
+      vminstall/lib/activate.sh "$STAGED_RELEASE_DIR/vminstall/lib/"
+  fi
   REMOTE_CHROME_TRANSITION_LOG="$root/transitions.log"
   : >"$REMOTE_CHROME_TRANSITION_LOG"
   REMOTE_CHROME_TTY="$root/installer.tty"
   : >"$REMOTE_CHROME_TTY"
   COMMAND_LOG="$root/installer-command.log"
   : >"$COMMAND_LOG"
+  export REMOTE_CHROME_FAKE_SYSTEMD_STATE="$root/systemd-state"
+  mkdir -p "$REMOTE_CHROME_FAKE_SYSTEMD_STATE"
+  touch "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/enabled" \
+    "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/active"
+  export REMOTE_CHROME_PROTOCOL_LOG="$root/protocol.log"
+  : >"$REMOTE_CHROME_PROTOCOL_LOG"
+  export REMOTE_CHROME_EXPECT_TOKEN
+  REMOTE_CHROME_EXPECT_TOKEN=$(
+    read_env_value "$REMOTE_CHROME_CONFIG_ROOT/credentials.env" MCP_TOKEN
+  )
+  export REMOTE_CHROME_EXPECT_USERNAME=remotechrome
+  export REMOTE_CHROME_EXPECT_PASSWORD
+  REMOTE_CHROME_EXPECT_PASSWORD=$(
+    read_env_value "$REMOTE_CHROME_CONFIG_ROOT/credentials.env" LOGIN_PASSWORD
+  )
   : >"$fake_log"
 }
 
 success_root="$test_root/activation-success"
 setup_activation_fixture "$success_root"
 prior_token=$(read_env_value "$REMOTE_CHROME_CONFIG_ROOT/credentials.env" MCP_TOKEN)
-vm_activate_release
+vm_activate_release >"$success_root/stdout" 2>"$success_root/stderr"
 [[ $(readlink "$REMOTE_CHROME_INSTALL_ROOT/current") == releases/v2.0.0 ]] ||
   fail 'current must switch to the candidate only after Compose config succeeds'
 [[ $(<"$REMOTE_CHROME_CONFIG_ROOT/active-version") == v2.0.0 ]] ||
@@ -342,9 +468,17 @@ assert_order "$REMOTE_CHROME_TRANSITION_LOG" \
   current-switched config-installed service-reloaded service-started \
   health-verified public-verified active-recorded
 assert_order "$fake_log" \
-  "docker <compose> <-f> <$REMOTE_CHROME_INSTALL_ROOT/releases/v2.0.0/compose.yaml> <-f> <$REMOTE_CHROME_INSTALL_ROOT/releases/v2.0.0/vminstall/compose.vm.yaml> <--env-file> <$REMOTE_CHROME_CONFIG_ROOT/compose.env.candidate> <config>" \
+  "docker <compose> <-f> <$REMOTE_CHROME_INSTALL_ROOT/releases/v2.0.0/compose.yaml> <-f> <$REMOTE_CHROME_INSTALL_ROOT/releases/v2.0.0/vminstall/compose.vm.yaml> <--env-file> <$REMOTE_CHROME_CONFIG_ROOT/compose.env.candidate> <config> <--quiet>" \
   "systemctl <daemon-reload>" \
   "systemctl <enable> <--now> <remote-chrome.service>"
+[[ -x $REMOTE_CHROME_CLI_ROOT/remote-chrome ]] ||
+  fail 'ExecStartPost target must be installed before service activation'
+grep -Fq ' <ps> ' "$fake_log" ||
+  fail 'the installed ExecStartPost wait-ready target must execute successfully'
+[[ $(stat -c '%a' "$REMOTE_CHROME_CONFIG_ROOT/activation-diagnostic.log") == 600 ]] ||
+  fail 'Compose diagnostics must be retained only in a root-only mode-600 file'
+[[ $(<"$REMOTE_CHROME_PROTOCOL_LOG") == $'initialize\ndelete\nget-405\nlogin-401\nlogin-200\nwebsocket-101' ]] ||
+  fail 'public verification must perform the complete strict protocol in order'
 
 vm_print_connection_handoff
 installed_token=$(read_env_value "$REMOTE_CHROME_CONFIG_ROOT/credentials.env" MCP_TOKEN)
@@ -358,15 +492,17 @@ for handoff_text in \
   'Login URL: https://chrome.example.com/login/' \
   'Login username: remotechrome' \
   "Login password: $installed_password" \
-  'Certificate: HTTPS managed by Caddy (ACME)' \
+  'Certificate: ready (public HTTPS verified for chrome.example.com during activation)' \
   'Credentials file: /etc/remote-chrome/credentials.env' \
   'Profile: /var/lib/remote-chrome/profile' \
   'Status: sudo remote-chrome status' \
   'Credentials: sudo remote-chrome credentials' \
   'Backup: sudo remote-chrome backup' \
   'Restore: sudo remote-chrome restore' \
+  '"mcpServers": {' \
   '"url": "https://chrome.example.com/mcp"' \
-  "authorization = \"Bearer $installed_token\""; do
+  '[mcp_servers.remote_chrome]' \
+  "headers = { Authorization = \"Bearer $installed_token\" }"; do
   grep -Fq -- "$handoff_text" "$REMOTE_CHROME_TTY" ||
     fail "connection handoff missing: $handoff_text"
 done
@@ -380,20 +516,57 @@ done
   fail 'activation command log leaked the login password'
 ! grep -Fq -- "$installed_token" "$fake_log" ||
   fail 'activation command log leaked the bearer token'
+! grep -Fq -- "$installed_token" "$success_root/stdout" 2>/dev/null ||
+  fail 'activation stdout leaked the bearer token'
+! grep -Fq -- "$installed_token" "$success_root/stderr" 2>/dev/null ||
+  fail 'activation stderr leaked the bearer token'
 
 # Mutating the Compose validation result must keep current on the prior release.
 config_fail_root="$test_root/compose-config-failure"
 setup_activation_fixture "$config_fail_root"
-REMOTE_CHROME_FAIL_AT=compose-config-validated
+export REMOTE_CHROME_FAKE_COMPOSE_CONFIG_FAIL=1
 set +e
-vm_activate_release >/dev/null 2>&1
+vm_activate_release >"$config_fail_root/stdout" 2>"$config_fail_root/stderr"
 config_fail_status=$?
 set -e
-unset REMOTE_CHROME_FAIL_AT
+unset REMOTE_CHROME_FAKE_COMPOSE_CONFIG_FAIL
 [[ $config_fail_status -ne 0 ]] ||
   fail 'injected Compose validation failure must abort activation'
 [[ $(readlink "$REMOTE_CHROME_INSTALL_ROOT/current") == releases/v1.0.0 ]] ||
   fail 'current must not switch when Compose candidate validation fails'
+[[ ! -e $REMOTE_CHROME_INSTALL_ROOT/releases/v2.0.0 ]] ||
+  fail 'failed Compose validation must remove its invocation-created release'
+grep -Fq ' <down>' "$fake_log" ||
+  fail 'failed Compose validation must stop the candidate before removal'
+! grep -Fq -- "$REMOTE_CHROME_EXPECT_TOKEN" "$config_fail_root/stdout" ||
+  fail 'failed Compose validation leaked the token to stdout'
+! grep -Fq -- "$REMOTE_CHROME_EXPECT_TOKEN" "$config_fail_root/stderr" ||
+  fail 'failed Compose validation leaked the token to stderr'
+! grep -Fq -- "$REMOTE_CHROME_EXPECT_TOKEN" "$fake_log" ||
+  fail 'failed Compose validation leaked the token to ordinary logs'
+[[ -f $REMOTE_CHROME_CONFIG_ROOT/activation-diagnostic.log &&
+   $(stat -c '%a' "$REMOTE_CHROME_CONFIG_ROOT/activation-diagnostic.log") == 600 ]] ||
+  fail 'failed Compose validation must preserve a confined mode-600 diagnostic'
+! grep -Fq -- "$REMOTE_CHROME_EXPECT_TOKEN" \
+  "$REMOTE_CHROME_CONFIG_ROOT/activation-diagnostic.log" ||
+  fail 'preserved Compose diagnostics must redact the token'
+
+# The same release version must be retryable after the failed invocation.
+STAGED_RELEASE_DIR="$REMOTE_CHROME_INSTALL_ROOT/releases/.staging-v2.0.0-retry"
+mkdir -p "$STAGED_RELEASE_DIR/vminstall/lib"
+printf 'services: {}\n' >"$STAGED_RELEASE_DIR/compose.yaml"
+printf 'services: {}\n' >"$STAGED_RELEASE_DIR/vminstall/compose.vm.yaml"
+cp vminstall/remote-chrome "$STAGED_RELEASE_DIR/vminstall/remote-chrome"
+chmod +x "$STAGED_RELEASE_DIR/vminstall/remote-chrome"
+cp vminstall/lib/common.sh vminstall/lib/config.sh \
+  vminstall/lib/activate.sh "$STAGED_RELEASE_DIR/vminstall/lib/"
+: >"$REMOTE_CHROME_TRANSITION_LOG"
+: >"$fake_log"
+: >"$REMOTE_CHROME_PROTOCOL_LOG"
+vm_activate_release >"$config_fail_root/retry.stdout" \
+  2>"$config_fail_root/retry.stderr"
+[[ $(readlink "$REMOTE_CHROME_INSTALL_ROOT/current") == releases/v2.0.0 ]] ||
+  fail 'same-version retry must activate after failed candidate cleanup'
 
 for early_failure_point in release-installed candidate-config-written; do
   early_failure_root="$test_root/early-$early_failure_point"
@@ -415,6 +588,8 @@ for early_failure_point in release-installed candidate-config-written; do
     fail "$early_failure_point must preserve installed configuration"
   ! grep -Fq 'systemctl <enable>' "$fake_log" ||
     fail "$early_failure_point must occur before service activation"
+  [[ ! -e $REMOTE_CHROME_INSTALL_ROOT/releases/v2.0.0 ]] ||
+    fail "$early_failure_point must remove its invocation-created release"
 done
 
 post_switch_points=(
@@ -427,6 +602,9 @@ for failure_point in "${post_switch_points[@]}"; do
   previous_install_sha=$(sha256sum "$REMOTE_CHROME_CONFIG_ROOT/install.env")
   previous_compose_sha=$(sha256sum "$REMOTE_CHROME_CONFIG_ROOT/compose.env")
   previous_credentials_sha=$(sha256sum "$REMOTE_CHROME_CONFIG_ROOT/credentials.env")
+  previous_unit_sha=$(sha256sum \
+    "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome.service")
+  previous_cli_sha=$(sha256sum "$REMOTE_CHROME_CLI_ROOT/remote-chrome")
   REMOTE_CHROME_FAIL_AT=$failure_point
   set +e
   vm_activate_release >"$rollback_root/stdout" 2>"$rollback_root/stderr"
@@ -443,13 +621,81 @@ for failure_point in "${post_switch_points[@]}"; do
     fail "$failure_point rollback must restore all prior environment state"
   [[ $(<"$REMOTE_CHROME_CONFIG_ROOT/active-version") == v1.0.0 ]] ||
     fail "$failure_point rollback must preserve the prior active version"
+  [[ $(sha256sum "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome.service") == \
+       "$previous_unit_sha" &&
+     $(sha256sum "$REMOTE_CHROME_CLI_ROOT/remote-chrome") == \
+       "$previous_cli_sha" ]] ||
+    fail "$failure_point rollback must restore the prior unit and CLI"
   grep -Fq ' <down>' "$fake_log" ||
     fail "$failure_point rollback must stop the candidate Compose project"
   grep -Fxq 'systemctl <start> <remote-chrome.service>' "$fake_log" ||
     fail "$failure_point rollback must restart the prior service"
   grep -Fq ' <ps> ' "$fake_log" ||
     fail "$failure_point rollback must health-check the prior version"
+  [[ -f $REMOTE_CHROME_FAKE_SYSTEMD_STATE/enabled &&
+     -f $REMOTE_CHROME_FAKE_SYSTEMD_STATE/active ]] ||
+    fail "$failure_point rollback must restore enabled and active service state"
+  [[ ! -e $REMOTE_CHROME_INSTALL_ROOT/releases/v2.0.0 ]] ||
+    fail "$failure_point rollback must remove its invocation-created release"
 done
+
+# A previously enabled but inactive unit must remain inactive, and rollback
+# must not invent a health check for a service that was not running.
+inactive_root="$test_root/rollback-prior-inactive"
+setup_activation_fixture "$inactive_root"
+rm -f "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/active"
+REMOTE_CHROME_FAIL_AT=service-started
+set +e
+vm_activate_release >"$inactive_root/stdout" 2>"$inactive_root/stderr"
+inactive_status=$?
+set -e
+unset REMOTE_CHROME_FAIL_AT
+[[ $inactive_status -ne 0 && -f $REMOTE_CHROME_FAKE_SYSTEMD_STATE/enabled &&
+   ! -e $REMOTE_CHROME_FAKE_SYSTEMD_STATE/active ]] ||
+  fail 'rollback must restore a previously enabled-but-inactive unit exactly'
+! grep -Fxq 'systemctl <start> <remote-chrome.service>' "$fake_log" ||
+  fail 'rollback must not start a unit that was previously inactive'
+
+# First-install failure after enable --now partially mutates systemd. Rollback
+# must remove every service/CLI/release residue and restore the absent state.
+first_install_root="$test_root/first-install-partial-enable"
+setup_activation_fixture "$first_install_root"
+rm -f "$REMOTE_CHROME_INSTALL_ROOT/current" \
+  "$REMOTE_CHROME_CONFIG_ROOT/install.env" \
+  "$REMOTE_CHROME_CONFIG_ROOT/compose.env" \
+  "$REMOTE_CHROME_CONFIG_ROOT/credentials.env" \
+  "$REMOTE_CHROME_CONFIG_ROOT/active-version" \
+  "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome.service" \
+  "$REMOTE_CHROME_CLI_ROOT/remote-chrome" \
+  "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/enabled" \
+  "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/active"
+export REMOTE_CHROME_FAKE_SYSTEMCTL_ENABLE_NOW_FAIL=1
+set +e
+vm_activate_release >"$first_install_root/stdout" \
+  2>"$first_install_root/stderr"
+first_install_status=$?
+set -e
+unset REMOTE_CHROME_FAKE_SYSTEMCTL_ENABLE_NOW_FAIL
+[[ $first_install_status -ne 0 ]] ||
+  fail 'partial first-install enable failure must abort activation'
+for residue in \
+  "$REMOTE_CHROME_INSTALL_ROOT/current" \
+  "$REMOTE_CHROME_INSTALL_ROOT/releases/v2.0.0" \
+  "$REMOTE_CHROME_CONFIG_ROOT/install.env" \
+  "$REMOTE_CHROME_CONFIG_ROOT/compose.env" \
+  "$REMOTE_CHROME_CONFIG_ROOT/credentials.env" \
+  "$REMOTE_CHROME_CONFIG_ROOT/active-version" \
+  "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome.service" \
+  "$REMOTE_CHROME_CLI_ROOT/remote-chrome" \
+  "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/enabled" \
+  "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/active"; do
+  [[ ! -e $residue && ! -L $residue ]] ||
+    fail "first-install rollback left residue: $residue"
+done
+grep -Fxq 'systemctl <stop> <remote-chrome.service>' "$fake_log" ||
+  fail 'first-install rollback must explicitly stop partial candidate state'
+grep -Fxq 'systemctl <disable> <remote-chrome.service>' "$fake_log" ||
+  fail 'first-install rollback must explicitly disable partial candidate state'
 
 rollback_health_root="$test_root/rollback-health-failure"
 setup_activation_fixture "$rollback_health_root"

@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+install_root=${REMOTE_CHROME_INSTALL_ROOT:-/opt/remotechromemcp}
+current="$install_root/current"
+
+case "${1:-}" in
+  wait-ready)
+    # Task 4 installs the service's readiness target before activation. Task 5
+    # extends this fixed dispatch boundary with the remaining CLI subcommands.
+    # shellcheck source=lib/common.sh
+    source "$current/vminstall/lib/common.sh"
+    # shellcheck source=lib/config.sh
+    source "$current/vminstall/lib/config.sh"
+    # shellcheck source=lib/activate.sh
+    source "$current/vminstall/lib/activate.sh"
+    vm_init_paths
+    vm_wait_stack_health "$current"
+    ;;
+  *)
+    printf 'Usage: remote-chrome wait-ready\n' >&2
+    exit 2
+    ;;
+esac

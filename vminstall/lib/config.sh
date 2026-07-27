@@ -1,21 +1,67 @@
 #!/usr/bin/env bash
 
 vm_require_management_destination() {
-  local destination=$1 canonical_root canonical_destination
+  local destination=$1 lexical_destination lexical_root root matched=0
+  [[ $destination == /* ]] || return 1
+  lexical_destination=$(realpath -sm -- "$destination") || return 1
   if [[ -n ${REMOTE_CHROME_TEST_ROOT:-} ]]; then
     [[ -n ${REMOTE_CHROME_CANONICAL_TEST_ROOT:-} ]] || return 1
-    canonical_root=$(realpath -e -- "$REMOTE_CHROME_TEST_ROOT") || return 1
-    [[ $canonical_root == "$REMOTE_CHROME_CANONICAL_TEST_ROOT" ]] || return 1
-    canonical_destination=$(realpath -m -- "$destination") || return 1
-    case "$canonical_destination" in
-      "$canonical_root"|"$canonical_root"/*) ;;
+    lexical_root=$(realpath -sm -- "$REMOTE_CHROME_TEST_ROOT") || return 1
+    [[ $lexical_root == "$REMOTE_CHROME_CANONICAL_TEST_ROOT" ]] || return 1
+    case "$lexical_destination" in
+      "$lexical_root"|"$lexical_root"/*) matched=1 ;;
       *)
         printf 'ERROR: management destination escapes test root: %s\n' \
           "$destination" >&2
         return 1
         ;;
     esac
+  else
+    for root in \
+      "$REMOTE_CHROME_INSTALL_ROOT" "$REMOTE_CHROME_CONFIG_ROOT" \
+      "$REMOTE_CHROME_SYSTEMD_ROOT" "$REMOTE_CHROME_CLI_ROOT" \
+      "${REMOTE_CHROME_DATA_DIR:-}"; do
+      [[ -n $root && $root == /* ]] || continue
+      lexical_root=$(realpath -sm -- "$root") || return 1
+      case "$lexical_destination" in
+        "$lexical_root"|"$lexical_root"/*) matched=1; break ;;
+      esac
+    done
+    ((matched == 1)) || {
+      printf 'ERROR: unmanaged destination rejected: %s\n' "$destination" >&2
+      return 1
+    }
   fi
+
+  local component=$lexical_destination mode
+  while [[ $component != / ]]; do
+    [[ ! -L $component ]] || {
+      printf 'ERROR: symlinked managed path component rejected: %s\n' \
+        "$component" >&2
+      return 1
+    }
+    if [[ -z ${REMOTE_CHROME_TEST_ROOT:-} && -e $component ]]; then
+      [[ $(stat -c '%u' -- "$component") == 0 ]] || {
+        printf 'ERROR: managed path component is not root-owned: %s\n' \
+          "$component" >&2
+        return 1
+      }
+      if [[ -d $component ]]; then
+        mode=$(stat -c '%a' -- "$component") || return 1
+        (( (8#$mode & 0022) == 0 )) || {
+          printf 'ERROR: managed path component is writable by non-root: %s\n' \
+            "$component" >&2
+          return 1
+        }
+      fi
+    fi
+    if [[ -n ${REMOTE_CHROME_TEST_ROOT:-} &&
+          $component == "$lexical_root" ]]; then
+      break
+    fi
+    component=${component%/*}
+    [[ -n $component ]] || component=/
+  done
   vm_require_confined_destination "$destination"
 }
 
@@ -49,38 +95,45 @@ vm_read_env_value() {
   ' "$file"
 }
 
-vm_write_secret_file() {
-  local destination=$1
-  local temporary="${destination}.tmp.$$"
+vm_write_managed_file() {
+  local destination=$1 mode=$2
+  local parent temporary
   vm_require_management_destination "$destination" || return 1
-  vm_require_management_destination "$temporary" || return 1
+  parent=${destination%/*}
+  [[ -n $parent ]] || parent=/
+  vm_require_management_destination "$parent" || return 1
   umask 077
-  install -d -m 0700 "$(dirname "$destination")" || return 1
-  if ! : >"$temporary" ||
-     ! chmod 0600 "$temporary" ||
+  install -d -m 0700 "$parent" || return 1
+  vm_require_management_destination "$parent" || return 1
+  temporary=$(mktemp -p "$parent" ".${destination##*/}.tmp.XXXXXXXXXX") ||
+    return 1
+  vm_require_management_destination "$temporary" || {
+    rm -f -- "$temporary"
+    return 1
+  }
+  if ! chmod "$mode" "$temporary" ||
      ! cat >"$temporary" ||
      ! chown root:root "$temporary" ||
+     ! vm_require_management_destination "$destination" ||
      ! mv -fT -- "$temporary" "$destination"; then
     rm -f -- "$temporary"
     return 1
   fi
 }
 
+vm_write_secret_file() {
+  vm_write_managed_file "$1" 0600
+}
+
 vm_render_systemd_service() {
   local destination="$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome.service.candidate"
-  local temporary="${destination}.tmp.$$"
   local template
   template="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/remote-chrome.service.in"
   vm_require_management_destination "$destination" || return 1
-  vm_require_management_destination "$temporary" || return 1
   [[ -f $template && ! -L $template ]] || return 1
   install -d -m 0755 "$REMOTE_CHROME_SYSTEMD_ROOT" || return 1
-  if ! install -m 0644 "$template" "$temporary" ||
-     ! chown root:root "$temporary" ||
-     ! mv -fT -- "$temporary" "$destination"; then
-    rm -f -- "$temporary"
-    return 1
-  fi
+  vm_require_management_destination "$REMOTE_CHROME_SYSTEMD_ROOT" || return 1
+  vm_write_managed_file "$destination" 0644 <"$template"
 }
 
 vm_generate_credentials() {
@@ -201,7 +254,8 @@ vm_prepare_config() {
   vm_validate_domain "$DOMAIN" || return 1
   vm_validate_email "$ACME_EMAIL" || return 1
 
-  local canonical_data_dir
+  local canonical_data_dir requested_data_dir=$REMOTE_CHROME_DATA_DIR
+  vm_require_management_destination "$requested_data_dir" || return 1
   canonical_data_dir=$(vm_canonicalize_data_dir "$REMOTE_CHROME_DATA_DIR") ||
     return 1
   vm_validate_data_dir "$canonical_data_dir" || return 1
@@ -217,6 +271,8 @@ vm_prepare_config() {
     vm_require_management_destination \
       "$REMOTE_CHROME_DATA_DIR/$subdirectory" || return 1
     install -d -m 0700 "$REMOTE_CHROME_DATA_DIR/$subdirectory" || return 1
+    vm_require_management_destination \
+      "$REMOTE_CHROME_DATA_DIR/$subdirectory" || return 1
   done
 
   vm_generate_credentials || return 1
