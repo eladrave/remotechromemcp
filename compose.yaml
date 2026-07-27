@@ -7,6 +7,7 @@ services:
         PLAYWRIGHT_MCP_VERSION: ${PLAYWRIGHT_MCP_VERSION:?set PLAYWRIGHT_MCP_VERSION}
     environment:
       SCREEN_GEOMETRY: ${SCREEN_GEOMETRY:-1440x900x24}
+      REMOTE_CHROME_MCP_SESSION_IDLE_TIMEOUT_MS: ${REMOTE_CHROME_MCP_SESSION_IDLE_TIMEOUT_MS:-1800000}
     init: true
     restart: unless-stopped
     stop_grace_period: 45s

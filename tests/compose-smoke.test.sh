@@ -299,6 +299,11 @@ initialize_and_close "$base_url/mcp" \
   --header "Authorization: Bearer $MCP_TOKEN"
 token_url="$base_url/${MCP_TOKEN}/mcp"
 initialize_and_close "$token_url"
+node tests/mcp-session-regression.cjs \
+  --endpoint "$token_url" \
+  --wait-seconds 35 \
+  --timeout-seconds 60 \
+  --insecure
 
 get_code="$(
   "${curl_https[@]}" --output /dev/null --write-out '%{http_code}' \

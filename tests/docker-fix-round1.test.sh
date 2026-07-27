@@ -53,15 +53,18 @@ cat >"$tmp_dir/bin/jq" <<'EOF'
 cat >/dev/null
 EOF
 
+cat >"$tmp_dir/bin/pgrep" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+
 cat >"$tmp_dir/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
 method=GET
 output=
-headers=
 write_out=
-session_id=
 url=
 while (($#)); do
   case "$1" in
@@ -73,21 +76,11 @@ while (($#)); do
       output="$2"
       shift 2
       ;;
-    --dump-header|-D)
-      headers="$2"
-      shift 2
-      ;;
     --write-out|-w)
       write_out="$2"
       shift 2
       ;;
-    --header|-H)
-      if [[ "$2" == Mcp-Session-Id:* ]]; then
-        session_id="${2#Mcp-Session-Id: }"
-      fi
-      shift 2
-      ;;
-    --data|-d|--max-time)
+    --header|-H|--data|-d|--max-time)
       shift 2
       ;;
     --fail|--silent|--show-error|--fail-with-body)
@@ -103,44 +96,37 @@ while (($#)); do
   esac
 done
 
-printf '%s %s session=%s\n' "$method" "$url" "$session_id" >>"$FAKE_CURL_LOG"
+printf '%s %s\n' "$method" "$url" >>"$FAKE_CURL_LOG"
 case "$url" in
   *:9222/json/version)
     printf '%s' '{"Browser":"Chrome/1","User-Agent":"Chrome/1"}'
     ;;
   *:8931/mcp)
-    if [[ "$method" == POST ]]; then
-      [[ -n "$headers" ]] && printf 'HTTP/1.1 200 OK\r\nmcp-session-id: cleanup-session\r\ncontent-type: application/json\r\n\r\n' >"$headers"
-      [[ -n "$output" ]] && printf '%s' '{"result":{"instructions":"REMOTE_CHROME_PLAYBOOK_VERSION=1"}}' >"$output"
-      [[ -n "$write_out" ]] && printf '200'
-    elif [[ "$method" == DELETE ]]; then
-      [[ "$session_id" == cleanup-session ]]
-    else
-      exit 1
-    fi
+    [[ "$method" == GET ]]
+    [[ -n "$write_out" ]] && printf '400'
     ;;
   *:6080/)
-    [[ -n "$output" ]] && printf '%s' '<title>noVNC</title>' >"$output"
+    printf '%s' '<title>noVNC</title>'
     ;;
   *)
     exit 1
     ;;
 esac
 EOF
-chmod +x "$tmp_dir/bin/curl" "$tmp_dir/bin/jq"
+chmod +x "$tmp_dir/bin/curl" "$tmp_dir/bin/jq" "$tmp_dir/bin/pgrep"
 
 if ! FAKE_CURL_LOG="$tmp_dir/curl.log" \
-  REMOTE_CHROME_RUNTIME_DIR="$tmp_dir/runtime" \
   PATH="$tmp_dir/bin:$PATH" \
   bash docker/healthcheck.sh; then
-  fail 'health check must parse lowercase mcp-session-id with Debian mawk'
+  fail 'non-mutating recurring health check must validate all runtime listeners'
 fi
-grep -q '^DELETE http://127\.0\.0\.1:8931/mcp session=cleanup-session$' \
-  "$tmp_dir/curl.log" ||
-  fail 'recurring health check must close its initialized MCP session'
+grep -q '^GET http://127\.0\.0\.1:8931/mcp$' "$tmp_dir/curl.log" ||
+  fail 'recurring health check must probe MCP without initializing a session'
+if grep -Eq '^POST |^DELETE ' "$tmp_dir/curl.log"; then
+  fail 'recurring health check must not mutate MCP session state'
+fi
 
 for file in \
-  docker/healthcheck.sh \
   scripts/bootstrap-docker.sh \
   tests/compose-smoke.test.sh; do
   if grep -q 'IGNORECASE' "$file"; then
@@ -177,6 +163,10 @@ assert_contains tests/compose-smoke.test.sh 'content-type' \
   'smoke test must count upstream Content-Type headers'
 assert_contains tests/compose-smoke.test.sh 'Mcp-Session-Id' \
   'smoke test must capture and close public MCP sessions'
+assert_contains tests/compose-smoke.test.sh 'mcp-session-regression\.cjs' \
+  'smoke test must exercise multiple browser calls in one public MCP session'
+assert_contains tests/compose-smoke.test.sh '\-\-wait-seconds 35' \
+  'smoke test must keep the public MCP session alive across recurring health checks'
 assert_contains tests/compose-smoke.test.sh 'expected 405|== 405' \
   'smoke test must verify authenticated GET is 405'
 assert_contains tests/compose-smoke.test.sh 'expected 401|== 401' \

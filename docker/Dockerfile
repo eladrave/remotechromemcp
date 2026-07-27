@@ -16,6 +16,7 @@ RUN apt-get update \
       x11vnc \
       novnc \
       websockify \
+      procps \
     && install -d -m 0755 /etc/apt/keyrings \
     && curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \
       | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg \
@@ -26,8 +27,15 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends google-chrome-stable \
     && rm -rf /var/lib/apt/lists/*
 
+COPY docker/patch-playwright-mcp-http.cjs /tmp/patch-playwright-mcp-http.cjs
+
 RUN test -n "$PLAYWRIGHT_MCP_VERSION" \
     && npm install -g "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" \
+    && node /tmp/patch-playwright-mcp-http.cjs \
+      --mcp-package-json /usr/local/lib/node_modules/@playwright/mcp/package.json \
+    && node /tmp/patch-playwright-mcp-http.cjs --check \
+      --mcp-package-json /usr/local/lib/node_modules/@playwright/mcp/package.json \
+    && rm -f /tmp/patch-playwright-mcp-http.cjs \
     && groupadd --gid 10001 remote-chrome \
     && useradd --uid 10001 --gid remote-chrome --create-home \
       --home-dir /home/remote-chrome remote-chrome \

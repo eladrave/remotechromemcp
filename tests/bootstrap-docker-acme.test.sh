@@ -54,6 +54,16 @@ case "${1:-}" in
     exit 0
     ;;
   run)
+    IFS= read -r supplied_password ||
+      {
+        printf 'password input must be newline-terminated\n' >&2
+        exit 72
+      }
+    [[ "$supplied_password" == "$(printf 'b%.0s' {1..48})" ]] ||
+      {
+        printf 'unexpected password input\n' >&2
+        exit 72
+      }
     printf '%s\n' '$2a$14$TRf6ynPaHFGoGIzGbRPBMumKVsUbVexXBXaVlsN0t6s/6MwOe5FMe'
     ;;
   *)

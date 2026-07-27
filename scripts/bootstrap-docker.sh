@@ -124,7 +124,7 @@ bootstrap_main() {
     fail 'Failed to generate a login password from 36 random bytes'
 
   login_password_hash="$(
-    printf '%s' "$login_password" |
+    printf '%s\n' "$login_password" |
       docker run --rm -i caddy:2-alpine \
         caddy hash-password --algorithm bcrypt
   )"

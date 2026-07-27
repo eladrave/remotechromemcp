@@ -27,6 +27,7 @@ for file in \
   docker/Dockerfile \
   docker/entrypoint.sh \
   docker/healthcheck.sh \
+  docker/patch-playwright-mcp-http.cjs \
   docker/supervisord.conf; do
   require_file "$file"
 done
@@ -96,6 +97,8 @@ for (const service of Object.values(services)) {
 
 if (browser.init !== true || browser.restart !== 'unless-stopped' || !browser.shm_size)
   throw new Error('browser lifecycle settings are incomplete');
+if (browser.environment?.REMOTE_CHROME_MCP_SESSION_IDLE_TIMEOUT_MS !== '1800000')
+  throw new Error('browser must receive the bounded MCP session idle timeout');
 if (proxy.init !== true || proxy.restart !== 'unless-stopped')
   throw new Error('proxy lifecycle settings are incomplete');
 
@@ -139,6 +142,7 @@ assert.match(browser, /^\s{4}init: true$/m);
 assert.match(browser, /^\s{4}restart: unless-stopped$/m);
 assert.match(browser, /^\s{4}stop_grace_period: 45s$/m);
 assert.match(browser, /^\s{4}shm_size:/m);
+assert.match(browser, /REMOTE_CHROME_MCP_SESSION_IDLE_TIMEOUT_MS/);
 assert.match(browser, /chrome-profile:\/data\/chrome-profile/);
 assert.match(proxy, /\$\{PROXY_BIND_ADDRESS:-0\.0\.0\.0\}:\$\{PROXY_HTTP_PORT:-80\}:80/);
 assert.match(proxy, /\$\{PROXY_BIND_ADDRESS:-0\.0\.0\.0\}:\$\{PROXY_HTTPS_PORT:-443\}:443/);
@@ -170,8 +174,12 @@ assert_contains docker/Dockerfile '^FROM node:22-bookworm-slim$' \
   'Dockerfile must use node:22-bookworm-slim'
 assert_contains docker/Dockerfile 'google-chrome-stable' \
   'Dockerfile must install full Google Chrome'
+assert_contains docker/Dockerfile 'procps' \
+  'Dockerfile must explicitly install pgrep for non-mutating process health checks'
 assert_contains docker/Dockerfile 'npm install -g "@playwright/mcp@\$\{PLAYWRIGHT_MCP_VERSION\}"' \
   'Dockerfile must use a valid npm package spec for the pinned Playwright MCP version'
+assert_contains docker/Dockerfile 'patch-playwright-mcp-http\.cjs --check' \
+  'Docker build must verify the exact Playwright MCP HTTP session patch'
 assert_contains docker/Dockerfile '^USER remote-chrome$' \
   'browser runtime must run as a non-root user'
 
@@ -189,6 +197,8 @@ assert_contains docker/supervisord.conf 'NODE_OPTIONS=.*inject-instructions\.cjs
   'Playwright MCP must preload the instruction shim'
 assert_contains docker/supervisord.conf 'NODE_PATH=.*@playwright/mcp/node_modules' \
   'instruction preload must resolve globally installed Playwright dependencies'
+assert_contains docker/supervisord.conf '^command=/usr/bin/openbox$' \
+  'Openbox must use DISPLAY from its environment instead of an unsupported flag'
 SUPERVISOR_FILE=docker/supervisord.conf node <<'NODE'
 const fs = require('node:fs');
 const assert = require('node:assert/strict');
@@ -216,14 +226,14 @@ assert_contains docker/healthcheck.sh '127\.0\.0\.1:9222/json/version' \
   'health check must inspect Chrome CDP'
 assert_contains docker/healthcheck.sh 'HeadlessChrome' \
   'health check must reject headless Chrome'
+assert_contains docker/healthcheck.sh 'Xvfb openbox x11vnc websockify' \
+  'health check must require the headed window manager'
 assert_contains docker/healthcheck.sh '127\.0\.0\.1:8931/mcp' \
-  'health check must initialize MCP'
-assert_contains docker/healthcheck.sh 'REMOTE_CHROME_PLAYBOOK_VERSION=1' \
-  'health check must verify injected MCP instructions'
-assert_contains docker/healthcheck.sh 'Mcp-Session-Id:' \
-  'health check must capture the initialized MCP session'
-assert_contains docker/healthcheck.sh '--request DELETE' \
-  'health check must close the initialized MCP session'
+  'health check must inspect the MCP HTTP listener'
+if grep -Eq -- 'initialize|Mcp-Session-Id|--request[[:space:]]+DELETE' \
+  docker/healthcheck.sh; then
+  fail 'recurring health check must not create or delete MCP application sessions'
+fi
 assert_contains docker/healthcheck.sh '127\.0\.0\.1:6080' \
   'health check must inspect noVNC'
 
