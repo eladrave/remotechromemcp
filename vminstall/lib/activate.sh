@@ -260,6 +260,43 @@ vm_verify_public_stack() {
   ((result == 0))
 }
 
+vm_wait_public_stack() {
+  local attempts=${REMOTE_CHROME_PUBLIC_ATTEMPTS:-}
+  local delay=${REMOTE_CHROME_PUBLIC_DELAY:-2}
+  if [[ -z $attempts ]]; then
+    if [[ -n ${REMOTE_CHROME_CANONICAL_TEST_ROOT:-} ]]; then
+      attempts=1
+    else
+      attempts=20
+    fi
+  fi
+  vm_validate_integer_bound "$attempts" 1 60 || {
+    printf 'ERROR: REMOTE_CHROME_PUBLIC_ATTEMPTS must be between 1 and 60\n' >&2
+    return 64
+  }
+  if [[ -n ${REMOTE_CHROME_CANONICAL_TEST_ROOT:-} ]]; then
+    vm_validate_integer_bound "$delay" 0 30 || {
+      printf 'ERROR: REMOTE_CHROME_PUBLIC_DELAY must be between 0 and 30\n' >&2
+      return 64
+    }
+    delay=0
+  else
+    vm_validate_integer_bound "$delay" 1 30 || {
+      printf 'ERROR: REMOTE_CHROME_PUBLIC_DELAY must be between 1 and 30\n' >&2
+      return 64
+    }
+  fi
+  while ((attempts > 0)); do
+    if vm_verify_public_stack; then
+      return 0
+    fi
+    attempts=$((attempts - 1))
+    ((attempts > 0)) && sleep "$delay"
+  done
+  printf 'ERROR: public TLS, MCP, login, or WebSocket verification did not become ready\n' >&2
+  return 1
+}
+
 vm_snapshot_activation_state() {
   local snapshot=$1
   vm_require_management_destination "$snapshot" || return 1

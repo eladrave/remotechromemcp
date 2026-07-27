@@ -96,11 +96,23 @@ vm_management_browser_state() {
 
 vm_management_ready() {
   local release
-  vm_management_load_installed_state || return 1
-  release=$(vm_management_release_path) || return 1
-  vm_wait_stack_health "$release" &&
-    vm_management_browser_state "$release" &&
-    vm_verify_public_stack
+  vm_management_load_installed_state || {
+    printf 'ERROR: installed configuration is not ready\n' >&2
+    return 1
+  }
+  release=$(vm_management_release_path) || {
+    printf 'ERROR: active release is not ready\n' >&2
+    return 1
+  }
+  vm_wait_stack_health "$release" || {
+    printf 'ERROR: browser or proxy container health did not become ready\n' >&2
+    return 1
+  }
+  vm_management_browser_state "$release" || {
+    printf 'ERROR: Chrome or browser playbook verification failed\n' >&2
+    return 1
+  }
+  vm_wait_public_stack
 }
 
 vm_management_prior_release() {
