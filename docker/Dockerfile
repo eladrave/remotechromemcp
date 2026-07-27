@@ -33,7 +33,13 @@ RUN test -n "$PLAYWRIGHT_MCP_VERSION" \
       --home-dir /home/remote-chrome remote-chrome \
     && install -d -o remote-chrome -g remote-chrome \
       /data/chrome-profile /run/remote-chrome /opt/remote-chrome \
-    && ln -sf /usr/share/novnc/vnc.html /usr/share/novnc/index.html
+    && ln -sf /usr/share/novnc/vnc.html /usr/share/novnc/index.html \
+    && sed -i \
+      "s|UI.initSetting('path', 'websockify');|UI.initSetting('path', 'login/websockify');|" \
+      /usr/share/novnc/app/ui.js \
+    && grep -Fq \
+      "UI.initSetting('path', 'login/websockify');" \
+      /usr/share/novnc/app/ui.js
 
 COPY --chown=remote-chrome:remote-chrome browser-playbook.md /opt/remote-chrome/browser-playbook.md
 COPY --chown=remote-chrome:remote-chrome lib/inject-instructions.cjs /opt/remote-chrome/inject-instructions.cjs

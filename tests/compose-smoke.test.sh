@@ -249,7 +249,8 @@ login_unauth_code="$(
 
 login_body="$tmp_dir/login.html"
 login_code="$(
-  "${curl_https[@]}" --output "$login_body" --write-out '%{http_code}' \
+  "${curl_https[@]}" --location \
+    --output "$login_body" --write-out '%{http_code}' \
     --user "$LOGIN_USERNAME:$LOGIN_PASSWORD" \
     "$base_url/login/"
 )"
@@ -258,8 +259,23 @@ login_code="$(
 grep -qi 'noVNC' "$login_body" ||
   fail 'authenticated /login/ did not serve noVNC'
 
+login_ui="$tmp_dir/ui.js"
+"${curl_https[@]}" --fail \
+  --user "$LOGIN_USERNAME:$LOGIN_PASSWORD" \
+  --output "$login_ui" \
+  "$base_url/login/app/ui.js"
+websocket_path="$(
+  sed -n \
+    "s/.*UI\\.initSetting('path', '\\([^']*\\)').*/\\1/p" \
+    "$login_ui" |
+    head -n 1
+)"
+[[ -n "$websocket_path" ]] ||
+  fail 'authenticated noVNC UI did not define a WebSocket path'
+[[ "$websocket_path" == /* ]] || websocket_path="/$websocket_path"
+
 websocket_headers="$tmp_dir/websocket.headers"
-set +e
+websocket_curl_status=0
 "${curl_https[@]}" --http1.1 --max-time 3 \
   --output /dev/null \
   --dump-header "$websocket_headers" \
@@ -268,13 +284,14 @@ set +e
   --header 'Upgrade: websocket' \
   --header 'Sec-WebSocket-Version: 13' \
   --header 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
-  "$base_url/login/websockify"
-websocket_curl_status=$?
-set -e
-[[ "$websocket_curl_status" == 0 || "$websocket_curl_status" == 28 ]] ||
-  fail "authenticated WebSocket curl failed with $websocket_curl_status"
+  "$base_url$websocket_path" ||
+  websocket_curl_status=$?
 grep -Eq '^HTTP/[^ ]+ 101([[:space:]]|$)' "$websocket_headers" ||
   fail 'authenticated noVNC WebSocket expected 101'
+[[ "$websocket_curl_status" == 0 ||
+   "$websocket_curl_status" == 23 ||
+   "$websocket_curl_status" == 28 ]] ||
+  fail "authenticated WebSocket curl failed with $websocket_curl_status"
 
 for id in $("${compose[@]}" ps -q); do
   published_ports="$(
