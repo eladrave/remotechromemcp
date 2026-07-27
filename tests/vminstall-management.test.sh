@@ -147,7 +147,7 @@ apply_patch_fake "$fake_bin/docker" \
   '    printf "browser healthy\nproxy healthy\n"' \
   '  fi' \
   'elif [[ " $* " == *" compose "*" exec -T browser "* ]]; then' \
-  '  printf "%s\n" "Chrome/123.0.0.0" "Mozilla/5.0 Chrome/123.0.0.0" "Remote Browser Interaction Playbook"' \
+  '  printf "%s\n" "Chrome/123.0.0.0" "Mozilla/5.0 Chrome/123.0.0.0" "REMOTE_CHROME_PLAYBOOK_VERSION=1"' \
   'elif [[ " $* " == *" compose "*" down"* && ${REMOTE_CHROME_FAKE_COMPOSE_DOWN_FAIL:-0} == 1 ]]; then' \
   '  printf "candidate shutdown failed\n" >&2' \
   '  exit 87' \
@@ -259,7 +259,7 @@ apply_patch_fake "$fake_bin/curl" \
   '      [[ $auth == "$bearer" ]] || exit 91' \
   '      status=200; event=initialize' \
   '      printf "HTTP/2 200\r\nContent-Type: application/json\r\nMcp-Session-Id: fixture-session\r\n\r\n" >"$headers"' \
-  '      printf "%s" '\''{"result":{"instructions":"Remote Browser Interaction Playbook"}}'\'' >"$output"' \
+  '      printf "%s" '\''{"result":{"instructions":"REMOTE_CHROME_PLAYBOOK_VERSION=1"}}'\'' >"$output"' \
   '    fi' \
   '    ;;' \
   '  DELETE:https://chrome.example.com/mcp)' \

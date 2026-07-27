@@ -191,7 +191,7 @@ vm_verify_public_stack() {
       '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"remote-chrome-installer","version":"1"}}}' \
       "$MCP_URL") || result=1
     [[ $status == 200 ]] || result=1
-    grep -Fq 'Remote Browser Interaction Playbook' "$response_body" ||
+    grep -Fq 'REMOTE_CHROME_PLAYBOOK_VERSION=1' "$response_body" ||
       result=1
   fi
   if ((result == 0)); then
