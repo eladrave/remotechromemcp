@@ -140,13 +140,15 @@ apply_patch_fake "$fake_bin/docker" \
   '    printf "compose warning MCP_TOKEN=%s\n" "$token" >&2' \
   '  fi' \
   '  [[ ${REMOTE_CHROME_FAKE_COMPOSE_CONFIG_FAIL:-0} != 1 ]]' \
+  'elif [[ " $* " == *" compose "*" ps -q browser"* ]]; then' \
+  '  printf "%064d\n" 0' \
   'elif [[ " $* " == *" compose "*" ps "* ]]; then' \
   '  if [[ ${REMOTE_CHROME_ROLLBACK:-0} == 1 && ${REMOTE_CHROME_FAKE_ROLLBACK_UNHEALTHY:-0} == 1 ]]; then' \
   '    printf "browser unhealthy\nproxy healthy\n"' \
   '  else' \
   '    printf "browser healthy\nproxy healthy\n"' \
   '  fi' \
-  'elif [[ " $* " == *" compose "*" exec -T browser "* ]]; then' \
+  'elif [[ ${1:-} == exec ]]; then' \
   '  printf "%s\n" "Chrome/123.0.0.0" "Mozilla/5.0 Chrome/123.0.0.0" "REMOTE_CHROME_PLAYBOOK_VERSION=1"' \
   'elif [[ " $* " == *" compose "*" down"* && ${REMOTE_CHROME_FAKE_COMPOSE_DOWN_FAIL:-0} == 1 ]]; then' \
   '  printf "candidate shutdown failed\n" >&2' \

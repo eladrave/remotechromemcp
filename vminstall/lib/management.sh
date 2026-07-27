@@ -79,11 +79,15 @@ vm_management_container_state() {
 }
 
 vm_management_browser_state() {
-  local release=$1 output
-  output=$(
+  local release=$1 output container
+  container=$(
     vm_compose_for_release "$release" \
       "$REMOTE_CHROME_CONFIG_ROOT/compose.env" \
-      exec -T browser sh -c \
+      ps -q browser
+  ) || return 1
+  [[ $container =~ ^[0-9a-f]{64}$ ]] || return 1
+  output=$(
+    vm_run_bounded docker exec "$container" sh -c \
       'chrome_version=$(curl -fsS --max-time 5 http://127.0.0.1:9222/json/version); printf "%s\n" "$chrome_version"; grep -Fx "REMOTE_CHROME_PLAYBOOK_VERSION=1" /opt/remote-chrome/browser-playbook.md'
   ) || return 1
   VM_MANAGEMENT_CHROME_VERSION=$(
