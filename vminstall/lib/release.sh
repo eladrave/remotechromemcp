@@ -43,21 +43,6 @@ vm_verify_pinned_release() {
 }
 
 vm_mark_unpinned_release() {
-  local install_env pending
-  install_env="$REMOTE_CHROME_CONFIG_ROOT/install.env"
-  if [[ -f $install_env && ! -L $install_env ]] &&
-     grep -q '^DOMAIN=' "$install_env"; then
-    vm_log 'WARNING: master release is unpinned'
-    vm_log_command release-verification unpinned
-    return 0
-  fi
-  pending="$install_env.pending.$$"
-  vm_require_confined_destination "$REMOTE_CHROME_CONFIG_ROOT" || return 1
-  install -d -m 0755 "$REMOTE_CHROME_CONFIG_ROOT"
-  vm_require_confined_destination "$pending" || return 1
-  printf '%s\n' 'RELEASE_VERIFICATION=unpinned' >"$pending"
-  vm_require_confined_destination "$install_env" || return 1
-  mv -f -- "$pending" "$install_env"
   vm_log 'WARNING: master release is unpinned'
   vm_log_command release-verification unpinned
 }

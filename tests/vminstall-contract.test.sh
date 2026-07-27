@@ -791,6 +791,7 @@ mkdir "$config_symlink_root" "$config_symlink_escape"
 REMOTE_CHROME_TEST_ROOT="$config_symlink_root"
 vm_init_paths
 ln -s ../config-symlink-escape "$config_symlink_root/etc"
+COMMAND_LOG="$config_symlink_root/master-staging.log"
 set +e
 (
   SELECTED_VERSION=master
@@ -799,10 +800,10 @@ set +e
   2>"$test_root/config-symlink.stderr"
 config_symlink_status=$?
 set -e
-[[ $config_symlink_status -ne 0 ]] ||
-  fail 'unpinned release marking must reject a descendant symlink escape'
+[[ $config_symlink_status -eq 0 ]] ||
+  fail 'master staging must not require configuration writes'
 [[ ! -e "$config_symlink_escape/remote-chrome/install.env" ]] ||
-  fail 'unpinned release marking must not escape the dry-run fixture root'
+  fail 'master staging must not write through a configuration symlink'
 
 REMOTE_CHROME_DRY_RUN=0
 REMOTE_CHROME_TEST_ROOT="$test_root"
@@ -814,8 +815,7 @@ COMMAND_LOG="$master_log"
 vm_stage_release "$release_fixture/remotechromemcp-master.tar.gz"
 grep -Fqi unpinned "$master_log" ||
   fail 'master staging must mark the release unpinned in logs'
-grep -Fxq 'RELEASE_VERIFICATION=unpinned' \
-  "$REMOTE_CHROME_CONFIG_ROOT/install.env" ||
-  fail 'master staging must persist its unpinned status'
+[[ ! -e $REMOTE_CHROME_CONFIG_ROOT/install.env ]] ||
+  fail 'master staging must not create a partial installed configuration'
 
 printf 'PASS: VM installer validation, platform, no-TTY, and release contracts\n'
