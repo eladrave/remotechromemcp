@@ -98,8 +98,27 @@ apply_patch_fake "$fake_bin/openssl" \
   '    head -c 48 /dev/urandom | base64 | tr -d "\n"' \
   '    printf "\n"' \
   '    ;;' \
+  '  s_client:*)' \
+  '    [[ " $* " == *" -connect chrome.example.com:443 "* ]] || exit 81' \
+  '    [[ " $* " == *" -servername chrome.example.com "* ]] || exit 82' \
+  '    [[ " $* " == *" -verify_return_error"* ]] || exit 83' \
+  '    printf "%s\n" "FIXTURE VERIFIED CERTIFICATE"' \
+  '    ;;' \
+  '  x509:-noout:-issuer)' \
+  '    [[ " $* " == *" -enddate"* ]] || exit 84' \
+  '    grep -Fxq "FIXTURE VERIFIED CERTIFICATE" || exit 85' \
+  '    printf "%s\n" "issuer=CN = Fixture Test CA" "notAfter=Jul 27 12:00:00 2027 GMT"' \
+  '    ;;' \
   '  *) exit 2 ;;' \
   'esac'
+
+apply_patch_fake "$fake_bin/timeout" \
+  'printf "timeout" >>"$FAKE_COMMAND_LOG"' \
+  'printf " <%s>" "$@" >>"$FAKE_COMMAND_LOG"' \
+  'printf "\n" >>"$FAKE_COMMAND_LOG"' \
+  '[[ ${1:-} == 5 ]] || exit 86' \
+  'shift' \
+  'exec "$@"'
 
 apply_patch_fake "$fake_bin/docker" \
   'printf "docker" >>"$FAKE_COMMAND_LOG"' \
@@ -126,6 +145,9 @@ apply_patch_fake "$fake_bin/docker" \
   '  else' \
   '    printf "browser healthy\nproxy healthy\n"' \
   '  fi' \
+  'elif [[ " $* " == *" compose "*" down"* && ${REMOTE_CHROME_FAKE_COMPOSE_DOWN_FAIL:-0} == 1 ]]; then' \
+  '  printf "candidate shutdown failed\n" >&2' \
+  '  exit 87' \
   'fi'
 
 apply_patch_fake "$fake_bin/systemctl" \
@@ -157,7 +179,7 @@ apply_patch_fake "$fake_bin/curl" \
   'printf "curl" >>"$FAKE_COMMAND_LOG"' \
   'printf " <%s>" "$@" >>"$FAKE_COMMAND_LOG"' \
   'printf "\n" >>"$FAKE_COMMAND_LOG"' \
-  'method=GET; headers=; output=; url=; header_file=; data=; http1=0' \
+  'method=GET; headers=; output=; url=; header_file=; data=; http1=0; max_time=' \
   'while (($#)); do' \
   '  case "$1" in' \
     '    --request) method=$2; shift 2 ;;' \
@@ -166,6 +188,7 @@ apply_patch_fake "$fake_bin/curl" \
   '    --header) [[ $2 == @* ]] && header_file=${2#@}; shift 2 ;;' \
   '    --data-binary) data=$2; shift 2 ;;' \
   '    --http1.1) http1=1; shift ;;' \
+  '    --max-time) max_time=$2; shift 2 ;;' \
   '    --write-out) shift 2 ;;' \
   '    --*) shift ;;' \
   '    *) url=$1; shift ;;' \
@@ -203,10 +226,20 @@ apply_patch_fake "$fake_bin/curl" \
   '    fi' \
   '    ;;' \
   '  GET:https://chrome.example.com/login/websockify)' \
-  '    [[ $auth == "$basic" && $http1 == 1 ]] || exit 95' \
+  '    [[ $auth == "$basic" && $http1 == 1 && $max_time == 3 ]] || exit 95' \
   '    [[ $(printf "%s" "$websocket_key" | base64 -d 2>/dev/null | wc -c) -eq 16 ]] || exit 96' \
+  '    if [[ ${REMOTE_CHROME_FAKE_WEBSOCKET_MODE:-} == timeout-no-101 ]]; then' \
+  '      : >"$headers"; printf "000"; exit 28' \
+  '    fi' \
+  '    if [[ ${REMOTE_CHROME_FAKE_WEBSOCKET_MODE:-} == other-error ]]; then' \
+  '      printf "HTTP/1.1 101 Switching Protocols\r\n\r\n" >"$headers"' \
+  '      printf "101"; exit 7' \
+  '    fi' \
   '    status=101; event=websocket-101' \
   '    printf "HTTP/1.1 101 Switching Protocols\r\n\r\n" >"$headers"' \
+  '    printf "%s" "$status"' \
+  '    printf "%s\n" "$event" >>"$REMOTE_CHROME_PROTOCOL_LOG"' \
+  '    exit 28' \
   '    ;;' \
   '  *) exit 97 ;;' \
   'esac' \
@@ -411,6 +444,13 @@ setup_activation_fixture() {
   cp "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome.service.candidate" \
     "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome.service"
   printf 'v1.0.0\n' >"$REMOTE_CHROME_CONFIG_ROOT/active-version"
+  {
+    printf '%s\n' \
+      'CERTIFICATE_STATUS=ready' \
+      'CERTIFICATE_ISSUER=CN = Prior Fixture CA' \
+      'CERTIFICATE_EXPIRES=Jul 27 12:00:00 2026 GMT'
+  } >"$REMOTE_CHROME_CONFIG_ROOT/certificate.env"
+  chmod 0600 "$REMOTE_CHROME_CONFIG_ROOT/certificate.env"
   install -d -m 0755 "$REMOTE_CHROME_CLI_ROOT"
   if [[ -f vminstall/remote-chrome ]]; then
     install -m 0755 vminstall/remote-chrome \
@@ -479,6 +519,21 @@ grep -Fq ' <ps> ' "$fake_log" ||
   fail 'Compose diagnostics must be retained only in a root-only mode-600 file'
 [[ $(<"$REMOTE_CHROME_PROTOCOL_LOG") == $'initialize\ndelete\nget-405\nlogin-401\nlogin-200\nwebsocket-101' ]] ||
   fail 'public verification must perform the complete strict protocol in order'
+grep -Fq ' <--http1.1> <--max-time> <3>' "$fake_log" ||
+  fail 'WebSocket verification must use a bounded three-second request'
+grep -Fxq \
+  'timeout <5> <openssl> <s_client> <-connect> <chrome.example.com:443> <-servername> <chrome.example.com> <-verify_return_error>' \
+  "$fake_log" ||
+  fail 'certificate metadata probe must be bounded and validate domain SNI'
+certificate_state="$REMOTE_CHROME_CONFIG_ROOT/certificate.env"
+[[ -f $certificate_state && $(stat -c '%a' "$certificate_state") == 600 ]] ||
+  fail 'verified certificate metadata must be stored in root-only state'
+[[ $(read_env_value "$certificate_state" CERTIFICATE_STATUS) == ready &&
+   $(read_env_value "$certificate_state" CERTIFICATE_ISSUER) == \
+     'CN = Fixture Test CA' &&
+   $(read_env_value "$certificate_state" CERTIFICATE_EXPIRES) == \
+     'Jul 27 12:00:00 2027 GMT' ]] ||
+  fail 'certificate state must contain deterministic readiness, issuer, and expiry'
 
 vm_print_connection_handoff
 installed_token=$(read_env_value "$REMOTE_CHROME_CONFIG_ROOT/credentials.env" MCP_TOKEN)
@@ -492,7 +547,9 @@ for handoff_text in \
   'Login URL: https://chrome.example.com/login/' \
   'Login username: remotechrome' \
   "Login password: $installed_password" \
-  'Certificate: ready (public HTTPS verified for chrome.example.com during activation)' \
+  'Certificate: ready (public HTTPS verified during activation)' \
+  'Certificate issuer: CN = Fixture Test CA' \
+  'Certificate expires: Jul 27 12:00:00 2027 GMT' \
   'Credentials file: /etc/remote-chrome/credentials.env' \
   'Profile: /var/lib/remote-chrome/profile' \
   'Status: sudo remote-chrome status' \
@@ -520,6 +577,19 @@ done
   fail 'activation stdout leaked the bearer token'
 ! grep -Fq -- "$installed_token" "$success_root/stderr" 2>/dev/null ||
   fail 'activation stderr leaked the bearer token'
+
+# Exit 28 is acceptable only after a captured 101 handshake, and unrelated
+# curl failures remain fatal even if a 101 header was written.
+for websocket_mode in timeout-no-101 other-error; do
+  websocket_failure_root="$test_root/websocket-$websocket_mode"
+  setup_activation_fixture "$websocket_failure_root"
+  export REMOTE_CHROME_FAKE_WEBSOCKET_MODE=$websocket_mode
+  if vm_verify_public_stack >"$websocket_failure_root/stdout" \
+    2>"$websocket_failure_root/stderr"; then
+    fail "WebSocket verification accepted invalid curl outcome: $websocket_mode"
+  fi
+  unset REMOTE_CHROME_FAKE_WEBSOCKET_MODE
+done
 
 # Mutating the Compose validation result must keep current on the prior release.
 config_fail_root="$test_root/compose-config-failure"
@@ -568,6 +638,43 @@ vm_activate_release >"$config_fail_root/retry.stdout" \
 [[ $(readlink "$REMOTE_CHROME_INSTALL_ROOT/current") == releases/v2.0.0 ]] ||
   fail 'same-version retry must activate after failed candidate cleanup'
 
+# If candidate shutdown cannot be confirmed before a switch, retain the exact
+# protected release, candidate Compose environment, and diagnostics.
+pre_switch_down_root="$test_root/pre-switch-down-failure"
+setup_activation_fixture "$pre_switch_down_root"
+export REMOTE_CHROME_FAKE_COMPOSE_CONFIG_FAIL=1
+export REMOTE_CHROME_FAKE_COMPOSE_DOWN_FAIL=1
+set +e
+vm_activate_release >"$pre_switch_down_root/stdout" \
+  2>"$pre_switch_down_root/stderr"
+pre_switch_down_status=$?
+set -e
+unset REMOTE_CHROME_FAKE_COMPOSE_CONFIG_FAIL \
+  REMOTE_CHROME_FAKE_COMPOSE_DOWN_FAIL
+[[ $pre_switch_down_status -ne 0 &&
+   $(readlink "$REMOTE_CHROME_INSTALL_ROOT/current") == releases/v1.0.0 ]] ||
+  fail 'pre-switch shutdown failure must abort without switching current'
+for retained in \
+  "$REMOTE_CHROME_INSTALL_ROOT/releases/v2.0.0" \
+  "$REMOTE_CHROME_CONFIG_ROOT/compose.env.candidate" \
+  "$REMOTE_CHROME_CONFIG_ROOT/activation-diagnostic.log" \
+  "$REMOTE_CHROME_CONFIG_ROOT/candidate-shutdown.log"; do
+  [[ -e $retained && ! -L $retained ]] ||
+    fail "pre-switch shutdown failure deleted recovery material: $retained"
+done
+[[ $(stat -c '%a' \
+  "$REMOTE_CHROME_CONFIG_ROOT/candidate-shutdown.log") == 600 ]] ||
+  fail 'candidate shutdown diagnostic must remain root-only'
+for path in \
+  "$REMOTE_CHROME_INSTALL_ROOT/releases/v2.0.0" \
+  "$REMOTE_CHROME_CONFIG_ROOT/compose.env.candidate" \
+  "$REMOTE_CHROME_CONFIG_ROOT/candidate-shutdown.log"; do
+  grep -Fq -- "$path" "$pre_switch_down_root/stderr" ||
+    fail "shutdown failure must report retained recovery path: $path"
+done
+! grep -Fq -- "$REMOTE_CHROME_EXPECT_TOKEN" "$pre_switch_down_root/stderr" ||
+  fail 'retained-recovery report must not expose the bearer token'
+
 for early_failure_point in release-installed candidate-config-written; do
   early_failure_root="$test_root/early-$early_failure_point"
   setup_activation_fixture "$early_failure_root"
@@ -592,6 +699,33 @@ for early_failure_point in release-installed candidate-config-written; do
     fail "$early_failure_point must remove its invocation-created release"
 done
 
+# Post-switch rollback must restore the prior release but retain candidate
+# recovery material whenever candidate Compose down fails.
+post_switch_down_root="$test_root/post-switch-down-failure"
+setup_activation_fixture "$post_switch_down_root"
+REMOTE_CHROME_FAIL_AT=service-started
+export REMOTE_CHROME_FAKE_COMPOSE_DOWN_FAIL=1
+set +e
+vm_activate_release >"$post_switch_down_root/stdout" \
+  2>"$post_switch_down_root/stderr"
+post_switch_down_status=$?
+set -e
+unset REMOTE_CHROME_FAIL_AT REMOTE_CHROME_FAKE_COMPOSE_DOWN_FAIL
+[[ $post_switch_down_status -ne 0 &&
+   $(readlink "$REMOTE_CHROME_INSTALL_ROOT/current") == releases/v1.0.0 ]] ||
+  fail 'post-switch shutdown failure must restore the prior current release'
+for retained in \
+  "$REMOTE_CHROME_INSTALL_ROOT/releases/v2.0.0" \
+  "$REMOTE_CHROME_CONFIG_ROOT/compose.env.candidate" \
+  "$REMOTE_CHROME_CONFIG_ROOT/candidate-shutdown.log"; do
+  [[ -e $retained && ! -L $retained ]] ||
+    fail "post-switch shutdown failure deleted recovery material: $retained"
+  grep -Fq -- "$retained" "$post_switch_down_root/stderr" ||
+    fail "post-switch recovery report missing retained path: $retained"
+done
+[[ -f $REMOTE_CHROME_FAKE_SYSTEMD_STATE/active ]] ||
+  fail 'post-switch shutdown failure must still restore prior active state'
+
 post_switch_points=(
   current-switched config-installed service-reloaded service-started
   health-verified public-verified active-recorded
@@ -602,6 +736,8 @@ for failure_point in "${post_switch_points[@]}"; do
   previous_install_sha=$(sha256sum "$REMOTE_CHROME_CONFIG_ROOT/install.env")
   previous_compose_sha=$(sha256sum "$REMOTE_CHROME_CONFIG_ROOT/compose.env")
   previous_credentials_sha=$(sha256sum "$REMOTE_CHROME_CONFIG_ROOT/credentials.env")
+  previous_certificate_sha=$(sha256sum \
+    "$REMOTE_CHROME_CONFIG_ROOT/certificate.env")
   previous_unit_sha=$(sha256sum \
     "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome.service")
   previous_cli_sha=$(sha256sum "$REMOTE_CHROME_CLI_ROOT/remote-chrome")
@@ -621,6 +757,9 @@ for failure_point in "${post_switch_points[@]}"; do
     fail "$failure_point rollback must restore all prior environment state"
   [[ $(<"$REMOTE_CHROME_CONFIG_ROOT/active-version") == v1.0.0 ]] ||
     fail "$failure_point rollback must preserve the prior active version"
+  [[ $(sha256sum "$REMOTE_CHROME_CONFIG_ROOT/certificate.env") == \
+       "$previous_certificate_sha" ]] ||
+    fail "$failure_point rollback must restore prior certificate metadata"
   [[ $(sha256sum "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome.service") == \
        "$previous_unit_sha" &&
      $(sha256sum "$REMOTE_CHROME_CLI_ROOT/remote-chrome") == \
@@ -664,6 +803,7 @@ rm -f "$REMOTE_CHROME_INSTALL_ROOT/current" \
   "$REMOTE_CHROME_CONFIG_ROOT/install.env" \
   "$REMOTE_CHROME_CONFIG_ROOT/compose.env" \
   "$REMOTE_CHROME_CONFIG_ROOT/credentials.env" \
+  "$REMOTE_CHROME_CONFIG_ROOT/certificate.env" \
   "$REMOTE_CHROME_CONFIG_ROOT/active-version" \
   "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome.service" \
   "$REMOTE_CHROME_CLI_ROOT/remote-chrome" \
@@ -684,6 +824,7 @@ for residue in \
   "$REMOTE_CHROME_CONFIG_ROOT/install.env" \
   "$REMOTE_CHROME_CONFIG_ROOT/compose.env" \
   "$REMOTE_CHROME_CONFIG_ROOT/credentials.env" \
+  "$REMOTE_CHROME_CONFIG_ROOT/certificate.env" \
   "$REMOTE_CHROME_CONFIG_ROOT/active-version" \
   "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome.service" \
   "$REMOTE_CHROME_CLI_ROOT/remote-chrome" \

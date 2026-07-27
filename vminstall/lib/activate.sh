@@ -47,6 +47,43 @@ vm_curl_status() {
     --request "$3" "${@:4}" --write-out '%{http_code}'
 }
 
+vm_capture_certificate_metadata() {
+  local metadata issuer expires
+  metadata=$(
+    timeout 5 openssl s_client \
+      -connect "$DOMAIN:443" \
+      -servername "$DOMAIN" \
+      -verify_return_error </dev/null 2>/dev/null |
+      openssl x509 -noout -issuer -enddate
+  ) || return 1
+  issuer=$(
+    awk 'index($0, "issuer=") == 1 {
+      print substr($0, length("issuer=") + 1)
+      found=1
+      exit
+    } END { if (!found) exit 1 }' <<<"$metadata"
+  ) || return 1
+  expires=$(
+    awk 'index($0, "notAfter=") == 1 {
+      print substr($0, length("notAfter=") + 1)
+      found=1
+      exit
+    } END { if (!found) exit 1 }' <<<"$metadata"
+  ) || return 1
+  [[ -n $issuer && -n $expires &&
+     $issuer != *$'\n'* && $issuer != *$'\r'* &&
+     $expires != *$'\n'* && $expires != *$'\r'* ]] || return 1
+
+  CERTIFICATE_STATUS=ready
+  CERTIFICATE_ISSUER=$issuer
+  CERTIFICATE_EXPIRES=$expires
+  {
+    printf 'CERTIFICATE_STATUS=%s\n' "$CERTIFICATE_STATUS"
+    printf 'CERTIFICATE_ISSUER=%s\n' "$CERTIFICATE_ISSUER"
+    printf 'CERTIFICATE_EXPIRES=%s\n' "$CERTIFICATE_EXPIRES"
+  } | vm_write_secret_file "$REMOTE_CHROME_CONFIG_ROOT/certificate.env"
+}
+
 vm_verify_public_stack() {
   local verify_dir="$REMOTE_CHROME_CONFIG_ROOT/.verify.$$"
   vm_require_management_destination "$verify_dir" || return 1
@@ -60,7 +97,7 @@ vm_verify_public_stack() {
   local response_body="$verify_dir/response.body"
   local login_headers="$verify_dir/login.headers"
   local empty_headers="$verify_dir/empty.headers"
-  local status session content_type_count basic_value
+  local status session content_type_count basic_value websocket_curl_status
   local result=0
 
   {
@@ -142,20 +179,23 @@ vm_verify_public_stack() {
     } | vm_write_secret_file "$websocket_headers" || result=1
   fi
   if ((result == 0)); then
+    websocket_curl_status=0
     status=$(vm_curl_status "$empty_headers" "$response_body" GET \
       --http1.1 \
+      --max-time 3 \
       --header "@$websocket_headers" \
-      "https://$DOMAIN/login/websockify") || result=1
-    [[ $status == 101 ]] || result=1
+      "https://$DOMAIN/login/websockify") || websocket_curl_status=$?
+    [[ $websocket_curl_status == 0 ||
+       $websocket_curl_status == 28 ]] || result=1
     tr -d '\r' <"$empty_headers" |
       grep -Eq '^HTTP/[^ ]+ 101([[:space:]]|$)' || result=1
+  fi
+  if ((result == 0)); then
+    vm_capture_certificate_metadata || result=1
   fi
 
   vm_require_management_destination "$verify_dir" || return 1
   rm -rf -- "$verify_dir"
-  if ((result == 0)); then
-    CERTIFICATE_STATUS="ready (public HTTPS verified for $DOMAIN during activation)"
-  fi
   ((result == 0))
 }
 
@@ -168,6 +208,7 @@ vm_snapshot_activation_state() {
     "$REMOTE_CHROME_CONFIG_ROOT/install.env" \
     "$REMOTE_CHROME_CONFIG_ROOT/compose.env" \
     "$REMOTE_CHROME_CONFIG_ROOT/credentials.env" \
+    "$REMOTE_CHROME_CONFIG_ROOT/certificate.env" \
     "$REMOTE_CHROME_CONFIG_ROOT/active-version" \
     "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome.service"; do
     name=${source##*/}
@@ -210,6 +251,7 @@ vm_restore_activation_state() {
     "$REMOTE_CHROME_CONFIG_ROOT/install.env" \
     "$REMOTE_CHROME_CONFIG_ROOT/compose.env" \
     "$REMOTE_CHROME_CONFIG_ROOT/credentials.env" \
+    "$REMOTE_CHROME_CONFIG_ROOT/certificate.env" \
     "$REMOTE_CHROME_CONFIG_ROOT/active-version" \
     "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome.service"; do
     name=${destination##*/}
@@ -273,6 +315,7 @@ vm_cleanup_candidate_config() {
     "$REMOTE_CHROME_CONFIG_ROOT/install.env.candidate" \
     "$REMOTE_CHROME_CONFIG_ROOT/compose.env.candidate" \
     "$REMOTE_CHROME_CONFIG_ROOT/credentials.env.candidate" \
+    "$REMOTE_CHROME_CONFIG_ROOT/candidate-shutdown.log" \
     "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome.service.candidate"; do
     vm_require_management_destination "$candidate" || return 1
     rm -f -- "$candidate"
@@ -311,13 +354,24 @@ vm_validate_candidate_compose() {
 
 vm_stop_candidate_release() {
   local candidate_release=$1 env_file
+  local diagnostic="$REMOTE_CHROME_CONFIG_ROOT/candidate-shutdown.log"
+  VM_CANDIDATE_STOP_CONFIRMED=0
+  : | vm_write_secret_file "$diagnostic" || return 1
   env_file="$REMOTE_CHROME_CONFIG_ROOT/compose.env.candidate"
   [[ -f $env_file && ! -L $env_file ]] ||
     env_file="$REMOTE_CHROME_CONFIG_ROOT/compose.env"
-  if [[ -f $env_file && ! -L $env_file ]]; then
-    vm_compose_for_release "$candidate_release" "$env_file" down \
-      >/dev/null 2>&1
+  if [[ -f $env_file && ! -L $env_file ]] &&
+     vm_compose_for_release "$candidate_release" "$env_file" down \
+       >>"$diagnostic" 2>&1; then
+    VM_CANDIDATE_STOP_CONFIRMED=1
+    return 0
   fi
+  printf '%s\n' \
+    'ERROR: candidate shutdown was not confirmed; recovery retained:' \
+    "  release: $candidate_release" \
+    "  compose environment: $env_file" \
+    "  shutdown diagnostic: $diagnostic" >&2
+  return 1
 }
 
 vm_remove_candidate_release() {
@@ -367,6 +421,7 @@ vm_activate_release() {
   local snapshot="$REMOTE_CHROME_CONFIG_ROOT/.rollback.$$"
   local candidate_release="$REMOTE_CHROME_INSTALL_ROOT/releases/$SELECTED_VERSION"
   local switched=0 installed_candidate=0 result=1 rollback_status=0
+  VM_CANDIDATE_STOP_CONFIRMED=0
 
   [[ -n ${STAGED_RELEASE_DIR:-} ]] || return 1
   vm_verify_release "$STAGED_RELEASE_DIR" || return 1
@@ -391,10 +446,11 @@ vm_activate_release() {
      ! vm_activation_transition candidate-config-written ||
      ! vm_validate_candidate_compose "$candidate_release" ||
      ! vm_activation_transition compose-config-validated; then
-    vm_stop_candidate_release "$candidate_release" || true
-    vm_cleanup_candidate_config || true
-    ((installed_candidate == 0)) ||
-      vm_remove_candidate_release "$candidate_release" || true
+    if vm_stop_candidate_release "$candidate_release"; then
+      vm_cleanup_candidate_config || true
+      ((installed_candidate == 0)) ||
+        vm_remove_candidate_release "$candidate_release" || true
+    fi
     rm -rf -- "$snapshot"
     return 1
   fi
@@ -428,9 +484,11 @@ vm_activate_release() {
     else
       vm_stop_candidate_release "$candidate_release" || true
     fi
-    vm_cleanup_candidate_config || true
-    ((installed_candidate == 0)) ||
-      vm_remove_candidate_release "$candidate_release" || true
+    if [[ ${VM_CANDIDATE_STOP_CONFIRMED:-0} == 1 ]]; then
+      vm_cleanup_candidate_config || true
+      ((installed_candidate == 0)) ||
+        vm_remove_candidate_release "$candidate_release" || true
+    fi
     rm -rf -- "$snapshot"
     [[ $rollback_status -eq 70 ]] && return 70
     return 1
@@ -461,7 +519,8 @@ vm_print_connection_handoff() {
   [[ -w $tty ]] || return 1
 
   local mcp_url mcp_token compatibility_url login_url username password
-  local data_dir profile certificate_status
+  local data_dir profile certificate_status certificate_issuer
+  local certificate_expires certificate_state
   mcp_url=$(vm_read_env_value "$credentials" MCP_URL) || return 1
   mcp_token=$(vm_read_env_value "$credentials" MCP_TOKEN) || return 1
   compatibility_url=$(
@@ -475,8 +534,18 @@ vm_print_connection_handoff() {
       REMOTE_CHROME_DATA_DIR
   ) || return 1
   profile=$(vm_display_installed_path "$data_dir/profile")
-  certificate_status=${CERTIFICATE_STATUS:-}
-  [[ -n $certificate_status ]] || return 1
+  certificate_state="$REMOTE_CHROME_CONFIG_ROOT/certificate.env"
+  [[ -f $certificate_state && ! -L $certificate_state ]] || return 1
+  certificate_status=$(
+    vm_read_env_value "$certificate_state" CERTIFICATE_STATUS
+  ) || return 1
+  certificate_issuer=$(
+    vm_read_env_value "$certificate_state" CERTIFICATE_ISSUER
+  ) || return 1
+  certificate_expires=$(
+    vm_read_env_value "$certificate_state" CERTIFICATE_EXPIRES
+  ) || return 1
+  [[ $certificate_status == ready ]] || return 1
 
   {
     printf '%s\n' \
@@ -487,7 +556,9 @@ vm_print_connection_handoff() {
       "Login URL: $login_url" \
       "Login username: $username" \
       "Login password: $password" \
-      "Certificate: $certificate_status" \
+      'Certificate: ready (public HTTPS verified during activation)' \
+      "Certificate issuer: $certificate_issuer" \
+      "Certificate expires: $certificate_expires" \
       'Credentials file: /etc/remote-chrome/credentials.env' \
       "Profile: $profile" \
       'Status: sudo remote-chrome status' \
