@@ -62,21 +62,47 @@ validate_staging_directory() {
 }
 
 package_residue_is_disposable() {
-  local entry_name=$1 residue_version residue_archive residue_checksum
+  local entry=$1 entry_name residue_version residue_archive residue_checksum
+  local generated_dir generated_archive generated_checksum candidate_hash
+  entry_name=${entry##*/}
   [[ $entry_name =~ ^package-(v[0-9]+\.[0-9]+\.[0-9]+)\.[A-Za-z0-9]{6}$ ]] ||
     return 1
   residue_version=${BASH_REMATCH[1]}
   residue_archive="$dist_dir/remotechromemcp-${residue_version}.tar.gz"
   residue_checksum="${residue_archive}.sha256"
+  generated_dir="$entry/generated"
+  generated_archive="$generated_dir/remotechromemcp-${residue_version}.tar.gz"
+  generated_checksum="${generated_archive}.sha256"
+
+  [[ -d $generated_dir && ! -L $generated_dir &&
+     -d $entry/dist && ! -L $entry/dist &&
+     -f $generated_archive && ! -L $generated_archive &&
+     -f $generated_checksum && ! -L $generated_checksum ]] || return 1
+  candidate_hash=$(
+    /usr/bin/sha256sum "$generated_archive" | /usr/bin/cut -d' ' -f1
+  ) ||
+    return 1
+  [[ $candidate_hash =~ ^[0-9a-f]{64}$ ]] || return 1
+  /usr/bin/cmp -s -- "$generated_checksum" <(
+    printf '%s  %s\n' "$candidate_hash" \
+      "remotechromemcp-${residue_version}.tar.gz"
+  ) || return 1
+  (
+    cd "$generated_dir"
+    /usr/bin/sha256sum -c "${generated_checksum##*/}"
+  ) >/dev/null || return 1
+
   if [[ ! -e $residue_archive && ! -L $residue_archive &&
         ! -e $residue_checksum && ! -L $residue_checksum ]]; then
     return 0
   fi
   [[ -f $residue_archive && ! -L $residue_archive &&
      -f $residue_checksum && ! -L $residue_checksum ]] || return 1
+  /usr/bin/cmp -s -- "$residue_archive" "$generated_archive" || return 1
+  /usr/bin/cmp -s -- "$residue_checksum" "$generated_checksum" || return 1
   (
     cd "$dist_dir"
-    sha256sum -c "${residue_checksum##*/}"
+    /usr/bin/sha256sum -c "${residue_checksum##*/}"
   ) >/dev/null
 }
 
@@ -134,7 +160,7 @@ recover_staging_root() {
         return 1
       }
     done <<<"$metadata_output"
-    package_residue_is_disposable "$entry_name" || {
+    package_residue_is_disposable "$entry" || {
       printf 'Release staging residue is required for manual recovery: %s\n' \
         "$entry" >&2
       printf 'The public pair is absent, incomplete, or invalid; do not delete the residue.\n' \

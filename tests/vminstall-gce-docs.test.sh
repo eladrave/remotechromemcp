@@ -84,6 +84,7 @@ require_literal "$packager" 'transition_to_recovery'
 require_literal "$packager" 'sync_staging_root'
 require_regex "$packager" \
   'recovery-v\[0-9\].*refuse|recovery.*manual review|Retained release recovery'
+require_literal "$packager" 'package_residue_is_disposable "$entry"'
 assert_before "$packager" '/usr/bin/flock -x "$publication_lock_fd"' \
   'status --porcelain'
 
@@ -761,6 +762,124 @@ EOF
   [[ $(find "$rollback_crash_repo/.release-staging" \
     -mindepth 1 -maxdepth 1 -type d | wc -l) -eq 1 ]] ||
     fail "rollback $rollback_crash_mode crash left unbounded recovery residue"
+done
+
+for candidate_binding_mode in \
+  wrong-self-consistent \
+  wrong-target \
+  multi-line \
+  generated-symlink \
+  generated-missing \
+  generated-mismatch \
+  generated-checksum-symlink \
+  generated-checksum-missing \
+  generated-checksum-mismatch \
+  generated-wrong-target \
+  generated-multi-line; do
+  binding_repo="$package_tmp/candidate-binding-$candidate_binding_mode-repo"
+  init_package_repo "$binding_repo" v1.0.0
+  binding_fault="$package_tmp/candidate-binding-$candidate_binding_mode-fault"
+  case "$candidate_binding_mode" in
+    wrong-self-consistent)
+      cat >"$binding_fault" <<'EOF'
+printf 'wrong public archive\n' >"$archive"
+(cd "$dist_dir" && sha256sum "$archive_name" >"$checksum_name")
+EOF
+      ;;
+    wrong-target)
+      cat >"$binding_fault" <<'EOF'
+printf 'wrong manifest target\n' >"$dist_dir/other.bin"
+(cd "$dist_dir" && sha256sum other.bin >"$checksum_name")
+EOF
+      ;;
+    multi-line)
+      cat >"$binding_fault" <<'EOF'
+printf 'second manifest target\n' >"$dist_dir/other.bin"
+(cd "$dist_dir" && {
+  sha256sum "$archive_name"
+  sha256sum other.bin
+} >"$checksum_name")
+EOF
+      ;;
+    generated-symlink)
+      cat >"$binding_fault" <<'EOF'
+printf 'wrong generated candidate\n' >"$generated/noncandidate"
+rm "$stage_archive"
+ln -s "$generated/noncandidate" "$stage_archive"
+EOF
+      ;;
+    generated-missing)
+      cat >"$binding_fault" <<'EOF'
+rm "$stage_archive"
+EOF
+      ;;
+    generated-mismatch)
+      cat >"$binding_fault" <<'EOF'
+printf 'mismatched generated candidate\n' >"$stage_archive"
+EOF
+      ;;
+    generated-checksum-symlink)
+      cat >"$binding_fault" <<'EOF'
+printf 'wrong generated manifest\n' >"$generated/wrong-manifest"
+rm "$stage_checksum"
+ln -s "$generated/wrong-manifest" "$stage_checksum"
+EOF
+      ;;
+    generated-checksum-missing)
+      cat >"$binding_fault" <<'EOF'
+rm "$stage_checksum"
+EOF
+      ;;
+    generated-checksum-mismatch)
+      cat >"$binding_fault" <<'EOF'
+printf '%064d  %s\n' 0 "$archive_name" >"$stage_checksum"
+EOF
+      ;;
+    generated-wrong-target)
+      cat >"$binding_fault" <<'EOF'
+printf 'wrong generated target\n' >"$generated/other.bin"
+(cd "$generated" && sha256sum other.bin >"$checksum_name")
+EOF
+      ;;
+    generated-multi-line)
+      cat >"$binding_fault" <<'EOF'
+printf 'second generated target\n' >"$generated/other.bin"
+(cd "$generated" && {
+  sha256sum "$archive_name"
+  sha256sum other.bin
+} >"$checksum_name")
+EOF
+      ;;
+  esac
+  sed -i \
+    '0,/^publish_dist_exchange$/s|^publish_dist_exchange$|publish_dist_exchange\nsource "'"$binding_fault"'"|' \
+    "$binding_repo/scripts/package-release.sh"
+  sed -i \
+    '/^transition_to_recovery() {$/a \  kill -KILL "$FAKE_PACKAGE_CRASH_PID"' \
+    "$binding_repo/scripts/package-release.sh"
+  sed -i '/^umask 077$/a export FAKE_PACKAGE_CRASH_PID=$BASHPID' \
+    "$binding_repo/scripts/package-release.sh"
+  retag_package_repo "$binding_repo" v1.0.0
+  if "$binding_repo/scripts/package-release.sh" v1.0.0 \
+    >/dev/null 2>"$package_tmp/candidate-binding-$candidate_binding_mode-error"; then
+    fail "$candidate_binding_mode crash-before-transition unexpectedly succeeded"
+  fi
+  binding_residue=$(find "$binding_repo/.release-staging" \
+    -mindepth 1 -maxdepth 1 -type d -name 'package-v1.0.0.*' -print -quit)
+  [[ -d $binding_residue ]] ||
+    fail "$candidate_binding_mode crash lost the package recovery residue"
+  if "$binding_repo/scripts/package-release.sh" v1.0.0 \
+    >/dev/null 2>"$package_tmp/candidate-binding-$candidate_binding_mode-rerun-error"; then
+    fail "$candidate_binding_mode rerun auto-reaped ambiguous residue"
+  fi
+  [[ -d $binding_residue ]] ||
+    fail "$candidate_binding_mode rerun deleted the prior-dist recovery copy"
+  grep -Fq "$binding_residue" \
+    "$package_tmp/candidate-binding-$candidate_binding_mode-rerun-error" ||
+    fail "$candidate_binding_mode rerun did not report retained recovery"
+  [[ $(find "$binding_repo/.release-staging" \
+    -mindepth 1 -maxdepth 1 -type d | wc -l) -eq 1 ]] ||
+    fail "$candidate_binding_mode crash left unbounded residue"
 done
 
 dirty_tracked_repo="$package_tmp/dirty-tracked-repo"
