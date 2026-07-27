@@ -378,35 +378,63 @@ vm_restore_profile_locked() (
     local original_status=$?
     trap - EXIT
     if ((preserved && ! completed)); then
-      local rollback_confirmed=1
-      if ! vm_backup_stop_browser "$release"; then
+      report_restore_recovery() {
         printf '%s\n' \
-          'ERROR: rollback stop could not be confirmed; recovery retained:' \
+          'ERROR: rollback could not be confirmed; recovery retained:' \
           "  current profile: $REMOTE_CHROME_DATA_DIR/profile" \
+          "  failed candidate: $failed" \
           "  rollback profile: $rollback" \
           "  restore staging: $restore_root" >&2
+      }
+      if ! vm_backup_stop_browser "$release"; then
+        report_restore_recovery
         vm_backup_start_browser "$release" || true
         vm_backup_health health || true
         exit 70
       fi
       if [[ -e $REMOTE_CHROME_DATA_DIR/profile ||
             -L $REMOTE_CHROME_DATA_DIR/profile ]]; then
-        mv -- "$REMOTE_CHROME_DATA_DIR/profile" "$failed" ||
-          rollback_confirmed=0
+        if ! mv -- "$REMOTE_CHROME_DATA_DIR/profile" "$failed"; then
+          vm_backup_start_browser "$release" || true
+          vm_backup_health health || true
+          report_restore_recovery
+          exit 70
+        fi
       fi
       if [[ -d $rollback && ! -L $rollback ]]; then
-        mv -- "$rollback" "$REMOTE_CHROME_DATA_DIR/profile" ||
-          rollback_confirmed=0
+        if ! mv -- "$rollback" "$REMOTE_CHROME_DATA_DIR/profile"; then
+          if [[ ! -e $REMOTE_CHROME_DATA_DIR/profile &&
+                ! -L $REMOTE_CHROME_DATA_DIR/profile &&
+                -d $failed && ! -L $failed ]]; then
+            mv -- "$failed" "$REMOTE_CHROME_DATA_DIR/profile" || true
+          fi
+          vm_backup_start_browser "$release" || true
+          vm_backup_health health || true
+          report_restore_recovery
+          exit 70
+        fi
       else
-        rollback_confirmed=0
+        if [[ ! -e $REMOTE_CHROME_DATA_DIR/profile &&
+              ! -L $REMOTE_CHROME_DATA_DIR/profile &&
+              -d $failed && ! -L $failed ]]; then
+          mv -- "$failed" "$REMOTE_CHROME_DATA_DIR/profile" || true
+        fi
+        vm_backup_start_browser "$release" || true
+        vm_backup_health health || true
+        report_restore_recovery
+        exit 70
       fi
-      vm_backup_start_browser "$release" || rollback_confirmed=0
-      vm_backup_health health || rollback_confirmed=0
-      if ((rollback_confirmed)); then
-        rm -rf -- "$failed" "$restore_root"
-      else
-        printf 'ERROR: rollback could not be confirmed; retained %s and %s\n' \
-          "$failed" "$restore_root" >&2
+      if ! vm_backup_start_browser "$release"; then
+        report_restore_recovery
+        exit 70
+      fi
+      if ! vm_backup_health health; then
+        report_restore_recovery
+        exit 70
+      fi
+      if ! rm -rf -- "$failed" "$restore_root"; then
+        report_restore_recovery
+        exit 70
       fi
     elif ((! completed)); then
       if ((restart_required)); then

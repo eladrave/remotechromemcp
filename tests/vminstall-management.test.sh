@@ -159,13 +159,29 @@ apply_patch_fake "$fake_bin/systemctl" \
   'printf " <%s>" "$@" >>"$FAKE_COMMAND_LOG"' \
   'printf "\n" >>"$FAKE_COMMAND_LOG"' \
   'case "${1:-}" in' \
-  '  is-enabled) [[ -f "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/enabled" ]] ;;' \
-  '  is-active) [[ -f "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/active" ]] ;;' \
+  '  is-enabled)' \
+  '    if [[ ${!#} == remote-chrome-backup.timer ]]; then' \
+  '      [[ -f "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/backup-timer.enabled" ]]' \
+  '    else' \
+  '      [[ -f "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/enabled" ]]' \
+  '    fi' \
+  '    ;;' \
+  '  is-active)' \
+  '    if [[ ${!#} == remote-chrome-backup.timer ]]; then' \
+  '      [[ -f "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/backup-timer.active" ]]' \
+  '    else' \
+  '      [[ -f "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/active" ]]' \
+  '    fi' \
+  '    ;;' \
   '  enable)' \
   '    if [[ ${!#} == remote-chrome-backup.timer ]]; then' \
   '      [[ -f "$REMOTE_CHROME_CONFIG_ROOT/active-version" ]] || exit 96' \
   '      [[ -f "$REMOTE_CHROME_CONFIG_ROOT/previous-version" ]] || exit 96' \
   '      [[ ${REMOTE_CHROME_FAKE_TIMER_FAIL:-0} != 1 ]] || exit 97' \
+  '      touch "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/backup-timer.enabled"' \
+  '      if [[ " $* " == *" --now "* ]]; then' \
+  '        touch "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/backup-timer.active"' \
+  '      fi' \
   '    fi' \
   '    [[ ${!#} == remote-chrome-backup.timer ]] || touch "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/enabled"' \
   '    if [[ " $* " == *" --now "* && ${!#} == remote-chrome.service ]]; then' \
@@ -174,9 +190,28 @@ apply_patch_fake "$fake_bin/systemctl" \
   '      [[ ${REMOTE_CHROME_FAKE_SYSTEMCTL_ENABLE_NOW_FAIL:-0} != 1 ]]' \
   '    fi' \
   '    ;;' \
-  '  disable) [[ ${!#} == remote-chrome-backup.timer ]] || rm -f "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/enabled" ;;' \
-  '  start) touch "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/active" ;;' \
-  '  stop) rm -f "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/active" ;;' \
+  '  disable)' \
+  '    if [[ ${!#} == remote-chrome-backup.timer ]]; then' \
+  '      [[ ${REMOTE_CHROME_FAKE_TIMER_DISABLE_FAIL:-0} != 1 ]] || exit 98' \
+  '      rm -f "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/backup-timer.enabled" "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/backup-timer.active"' \
+  '    else' \
+  '      rm -f "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/enabled"' \
+  '    fi' \
+  '    ;;' \
+  '  start)' \
+  '    if [[ ${!#} == remote-chrome-backup.timer ]]; then' \
+  '      touch "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/backup-timer.active"' \
+  '    else' \
+  '      touch "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/active"' \
+  '    fi' \
+  '    ;;' \
+  '  stop)' \
+  '    if [[ ${!#} == remote-chrome-backup.timer ]]; then' \
+  '      rm -f "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/backup-timer.active"' \
+  '    else' \
+  '      rm -f "$REMOTE_CHROME_FAKE_SYSTEMD_STATE/active"' \
+  '    fi' \
+  '    ;;' \
   'esac'
 
 apply_patch_fake "$fake_bin/chown" \
@@ -635,6 +670,32 @@ unset REMOTE_CHROME_FAKE_TIMER_FAIL
    $(readlink "$REMOTE_CHROME_INSTALL_ROOT/current") == releases/v1.0.0 &&
    $(<"$REMOTE_CHROME_CONFIG_ROOT/active-version") == v1.0.0 ]] ||
   fail 'post-commit timer activation failure must roll release activation back'
+
+timer_removal_failure_root="$test_root/timer-removal-failure"
+setup_activation_fixture "$timer_removal_failure_root"
+cp vminstall/remote-chrome-backup.service.in \
+  "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome-backup.service"
+cp vminstall/remote-chrome-backup.timer.in \
+  "$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome-backup.timer"
+: >"$REMOTE_CHROME_FAKE_SYSTEMD_STATE/backup-timer.enabled"
+: >"$REMOTE_CHROME_FAKE_SYSTEMD_STATE/backup-timer.active"
+sed -i 's/^BACKUP_SCHEDULE=.*$/BACKUP_SCHEDULE=/' \
+  "$REMOTE_CHROME_CONFIG_ROOT/install.env"
+export REMOTE_CHROME_FAKE_TIMER_DISABLE_FAIL=1
+set +e
+vm_activate_release >"$timer_removal_failure_root/stdout" \
+  2>"$timer_removal_failure_root/stderr"
+timer_removal_failure_status=$?
+set -e
+unset REMOTE_CHROME_FAKE_TIMER_DISABLE_FAIL
+[[ $timer_removal_failure_status -ne 0 &&
+   $(readlink "$REMOTE_CHROME_INSTALL_ROOT/current") == releases/v1.0.0 &&
+   $(<"$REMOTE_CHROME_CONFIG_ROOT/active-version") == v1.0.0 &&
+   -f $REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome-backup.service &&
+   -f $REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome-backup.timer &&
+   -f $REMOTE_CHROME_FAKE_SYSTEMD_STATE/backup-timer.enabled &&
+   -f $REMOTE_CHROME_FAKE_SYSTEMD_STATE/backup-timer.active ]] ||
+  fail 'timer schedule-removal failure must roll back release and timer state'
 
 # Exit 28 is acceptable only after a captured 101 handshake, and unrelated
 # curl failures remain fatal even if a 101 header was written.

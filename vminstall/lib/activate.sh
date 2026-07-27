@@ -473,10 +473,18 @@ vm_activate_backup_timer() {
   if [[ -n ${BACKUP_SCHEDULE:-} ]]; then
     vm_run_bounded systemctl enable --now remote-chrome-backup.timer
   else
-    if [[ -e $REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome-backup.service ||
-          -e $REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome-backup.timer ]] ||
-       vm_run_bounded systemctl is-enabled --quiet remote-chrome-backup.timer ||
-       vm_run_bounded systemctl is-active --quiet remote-chrome-backup.timer; then
+    local timer="$REMOTE_CHROME_SYSTEMD_ROOT/remote-chrome-backup.timer"
+    local timer_present=0 timer_enabled=0 timer_active=0
+    [[ ! -e $timer ]] || timer_present=1
+    if vm_run_bounded systemctl is-enabled --quiet \
+      remote-chrome-backup.timer; then
+      timer_enabled=1
+    fi
+    if vm_run_bounded systemctl is-active --quiet \
+      remote-chrome-backup.timer; then
+      timer_active=1
+    fi
+    if ((timer_present || timer_enabled || timer_active)); then
       vm_run_bounded systemctl disable --now remote-chrome-backup.timer ||
         return 1
     fi
