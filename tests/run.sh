@@ -8,12 +8,16 @@ bash tests/vm-compose-contract.test.sh
 bash tests/vminstall-bootstrap.test.sh
 bash tests/vminstall-contract.test.sh
 bash tests/vminstall-distributions.test.sh
+bash tests/vminstall-gce-docs.test.sh
 bash tests/vminstall-management.test.sh
 bash tests/vminstall-backup.test.sh
 bash tests/bootstrap-docker-acme.test.sh
 bash tests/skill-contract.test.sh
 bash tests/docker-fix-round1.test.sh
-for script in setup.sh login.sh status.sh uninstall.sh scripts/*.sh docker/*.sh lib/*.sh tests/*.sh; do
+for script in \
+  setup.sh login.sh status.sh uninstall.sh \
+  scripts/*.sh docker/*.sh lib/*.sh tests/*.sh \
+  vminstall/*.sh vminstall/lib/*.sh; do
   [[ -e "$script" ]] || continue
   bash -n "$script"
 done

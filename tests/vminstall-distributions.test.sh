@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_dir"
+original_path=$PATH
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
@@ -111,13 +112,14 @@ REMOTE_CHROME_SKIP_MAIN=1
 # shellcheck source=../vminstall/installer-main.sh
 source vminstall/installer-main.sh
 
-missing=()
+missing=
 for function_name in \
   vm_ensure_profile_exchange_runtime vm_check_host vm_install_docker; do
-  declare -F "$function_name" >/dev/null || missing+=("$function_name")
+  declare -F "$function_name" >/dev/null ||
+    missing="${missing:+$missing }$function_name"
 done
-((${#missing[@]} == 0)) ||
-  fail "undefined functions: ${missing[*]}"
+[[ -z $missing ]] ||
+  fail "undefined functions: $missing"
 
 assert_no_mutations() {
   ! grep -Eq '^(apt-get|install|gpg|mv|systemctl) ' "$command_log" ||
@@ -156,7 +158,9 @@ for matrix_row in \
   'ubuntu-22.04 ubuntu 22.04 jammy' \
   'ubuntu-24.04 ubuntu 24.04 noble' \
   'debian-12 debian 12 bookworm'; do
-  read -r fixture os_id version codename <<<"$matrix_row"
+  read -r fixture os_id version codename <<EOF
+$matrix_row
+EOF
   fixture_root="$test_root/matrix-$fixture"
   mkdir "$fixture_root"
   set_command_log_root "$fixture_root"
@@ -514,3 +518,210 @@ if grep -En \
 fi
 
 printf 'PASS: VM host, distribution, Docker, and network preflight contracts\n'
+
+PATH=$original_path
+export PATH
+
+if [[ ${REMOTE_CHROME_VM_DIST_INNER:-0} == 1 ]]; then
+  inner_root="$(mktemp -d /tmp/remote-chrome-vminstall-inner.XXXXXX)"
+  trap 'rm -rf "$test_root" "$inner_root"' EXIT
+  inner_command_log="$inner_root/commands.log"
+  : >"$inner_command_log"
+
+  REMOTE_CHROME_DRY_RUN=1
+  REMOTE_CHROME_TEST_ROOT="$inner_root"
+  REMOTE_CHROME_OS_RELEASE=/etc/os-release
+  unset REMOTE_CHROME_TEST_ARCH
+  REMOTE_CHROME_TEST_EUID=0
+  COMMAND_LOG="$inner_command_log"
+  vm_init_paths
+  vm_load_platform ||
+    fail 'inner distribution test must load real /etc/os-release'
+  [[ $(uname -m) == x86_64 ]] ||
+    fail "inner distribution test requires x86_64, found $(uname -m)"
+  vm_validate_platform ||
+    fail "unsupported inner distribution: $OS_ID $OS_VERSION"
+  command -v dash >/dev/null 2>&1 ||
+    fail 'inner distribution is missing dash'
+  dash -n vminstall/*.sh vminstall/lib/*.sh ||
+    fail 'portable installer shell files must parse with dash'
+
+  case "$OS_ID:$OS_VERSION" in
+    ubuntu:22.04) inner_codename=jammy ;;
+    ubuntu:24.04) inner_codename=noble ;;
+    debian:12) inner_codename=bookworm ;;
+    *) fail "unsupported inner package contract: $OS_ID $OS_VERSION" ;;
+  esac
+  vm_install_docker
+  grep -Fxq \
+    'apt-get <install> <-y> <ca-certificates> <curl> <gnupg> <openssl> <tar> <gzip> <coreutils> <python3>' \
+    "$inner_command_log" ||
+    fail 'inner dry-run must request the complete prerequisite package set'
+  grep -Fxq \
+    'apt-get <install> <-y> <docker-ce> <docker-ce-cli> <containerd.io> <docker-buildx-plugin> <docker-compose-plugin>' \
+    "$inner_command_log" ||
+    fail 'inner dry-run must request the official Docker package set'
+  grep -Fxq \
+    "deb [arch=amd64 signed-by=$inner_root/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$OS_ID $inner_codename stable" \
+    "$inner_root/etc/apt/sources.list.d/docker.list" ||
+    fail 'inner dry-run must stage the real distribution package source'
+  exit 0
+fi
+
+if [[ ${REMOTE_CHROME_VM_DIST_CONTRACT_CHILD:-0} != 1 ]]; then
+  outer_fake_bin="$test_root/outer-fake-bin"
+  outer_docker_log="$test_root/outer-docker.log"
+  outer_expected_log="$test_root/outer-docker.expected"
+  mkdir "$outer_fake_bin"
+  : >"$outer_docker_log"
+  cat >"$outer_fake_bin/docker" <<'FAKE_DOCKER'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'CALL %s\n' "$#" >>"$OUTER_DOCKER_LOG"
+printf 'ARG %s\n' "$@" >>"$OUTER_DOCKER_LOG"
+case "${1:-}" in
+  info) exit "${FAKE_DOCKER_INFO_STATUS:-0}" ;;
+  run) exit "${FAKE_DOCKER_RUN_STATUS:-0}" ;;
+  *) exit 64 ;;
+esac
+FAKE_DOCKER
+  chmod +x "$outer_fake_bin/docker"
+
+  run_outer_probe() {
+    : >"$outer_docker_log"
+    set +e
+    env -u CI -u VM_INSTALL_TEST_IMAGE \
+      PATH="$outer_fake_bin:$PATH" \
+      OUTER_DOCKER_LOG="$outer_docker_log" \
+      REMOTE_CHROME_VM_DIST_CONTRACT_CHILD=1 \
+      "$@" \
+      bash "$repo_dir/tests/vminstall-distributions.test.sh" \
+      >"$test_root/outer.stdout" 2>"$test_root/outer.stderr"
+    outer_status=$?
+    set -e
+  }
+
+  assert_safe_docker_run() {
+    local image=$1
+    cat >"$outer_expected_log" <<EOF
+CALL 1
+ARG info
+CALL 11
+ARG run
+ARG --rm
+ARG --mount
+ARG type=bind,source=$repo_dir,target=/workspace,readonly
+ARG --env
+ARG REMOTE_CHROME_VM_DIST_INNER=1
+ARG --workdir
+ARG /workspace
+ARG $image
+ARG bash
+ARG tests/vminstall-distributions.test.sh
+EOF
+    cmp -s "$outer_expected_log" "$outer_docker_log" ||
+      fail "unsafe or unexpected Docker arguments for $image: $(cat "$outer_docker_log")"
+  }
+
+  run_outer_probe
+  [[ $outer_status -eq 0 ]] ||
+    fail "unset optional image must succeed, got status $outer_status"
+  [[ ! -s $outer_docker_log ]] ||
+    fail 'unset optional image must not invoke Docker'
+
+  for allowed_image in ubuntu:22.04 ubuntu:24.04 debian:12; do
+    run_outer_probe CI=1 "VM_INSTALL_TEST_IMAGE=$allowed_image"
+    [[ $outer_status -eq 0 ]] ||
+      fail "allowlisted image $allowed_image failed with status $outer_status"
+    assert_safe_docker_run "$allowed_image"
+    grep -Fxq "PASS: VM distribution image $allowed_image" \
+      "$test_root/outer.stdout" ||
+      fail "allowlisted image $allowed_image needs a positive PASS"
+  done
+
+  for rejected_image in \
+    alpine:latest \
+    --privileged \
+    $'ubuntu:22.04\n--privileged'; do
+    run_outer_probe CI=1 "VM_INSTALL_TEST_IMAGE=$rejected_image"
+    [[ $outer_status -ne 0 ]] ||
+      fail "invalid image value must fail: $rejected_image"
+    [[ ! -s $outer_docker_log ]] ||
+      fail "invalid image value reached Docker: $rejected_image"
+  done
+
+  run_outer_probe \
+    FAKE_DOCKER_INFO_STATUS=1 \
+    VM_INSTALL_TEST_IMAGE=ubuntu:22.04
+  [[ $outer_status -eq 0 ]] ||
+    fail 'local Docker infrastructure failure must skip successfully'
+  grep -Fq 'SKIP:' "$test_root/outer.stdout" ||
+    fail 'local Docker infrastructure failure must print SKIP'
+  cat >"$outer_expected_log" <<'EOF'
+CALL 1
+ARG info
+EOF
+  cmp -s "$outer_expected_log" "$outer_docker_log" ||
+    fail 'daemon failure must not attempt docker run'
+
+  run_outer_probe \
+    CI=1 \
+    FAKE_DOCKER_INFO_STATUS=1 \
+    VM_INSTALL_TEST_IMAGE=ubuntu:22.04
+  [[ $outer_status -ne 0 ]] ||
+    fail 'CI Docker infrastructure failure must fail instead of skipping'
+  ! grep -Fq 'SKIP:' "$test_root/outer.stdout" ||
+    fail 'CI Docker infrastructure failure must not report a skip'
+  cmp -s "$outer_expected_log" "$outer_docker_log" ||
+    fail 'CI daemon failure must not attempt docker run'
+
+  run_outer_probe \
+    FAKE_DOCKER_RUN_STATUS=73 \
+    VM_INSTALL_TEST_IMAGE=ubuntu:22.04
+  [[ $outer_status -eq 73 ]] ||
+    fail "launched container failure must propagate status 73, got $outer_status"
+  ! grep -Fq 'SKIP:' "$test_root/outer.stdout" ||
+    fail 'launched container failure must never become a local skip'
+  ! grep -Fq 'PASS: VM distribution image' "$test_root/outer.stdout" ||
+    fail 'failed container test must not print an image PASS'
+fi
+
+requested_image=${VM_INSTALL_TEST_IMAGE:-}
+[[ -n $requested_image ]] || exit 0
+
+case "$requested_image" in
+  ubuntu:22.04|ubuntu:24.04|debian:12) ;;
+  *) fail "unsupported VM_INSTALL_TEST_IMAGE: $requested_image" ;;
+esac
+
+docker_unavailable=
+if ! command -v docker >/dev/null 2>&1; then
+  docker_unavailable='Docker client is unavailable'
+elif ! docker info >/dev/null 2>&1; then
+  docker_unavailable='Docker daemon is unavailable'
+fi
+
+if [[ -n $docker_unavailable ]]; then
+  if [[ ${CI:-} == 1 ]]; then
+    fail "$docker_unavailable in CI"
+  fi
+  printf 'SKIP: %s; optional image %s was not run\n' \
+    "$docker_unavailable" "$requested_image"
+  exit 0
+fi
+
+set +e
+docker run --rm \
+  --mount "type=bind,source=$repo_dir,target=/workspace,readonly" \
+  --env REMOTE_CHROME_VM_DIST_INNER=1 \
+  --workdir /workspace \
+  "$requested_image" \
+  bash tests/vminstall-distributions.test.sh
+container_status=$?
+set -e
+if [[ $container_status -ne 0 ]]; then
+  printf 'FAIL: VM distribution image %s exited with status %s\n' \
+    "$requested_image" "$container_status" >&2
+  exit "$container_status"
+fi
+printf 'PASS: VM distribution image %s\n' "$requested_image"
