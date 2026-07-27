@@ -47,6 +47,7 @@ vm_compose_for_release() {
   local release=$1 env_file=$2
   shift 2
   vm_run_bounded docker compose \
+    --project-name remote-chrome \
     -f "$release/compose.yaml" \
     -f "$release/vminstall/compose.vm.yaml" \
     --env-file "$env_file" "$@"

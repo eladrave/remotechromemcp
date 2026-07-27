@@ -560,9 +560,9 @@ printf 'replacement\n' | vm_write_secret_file "$predictable_destination"
 for fixed_service_line in \
   'WorkingDirectory=/opt/remotechromemcp/current' \
   'EnvironmentFile=/etc/remote-chrome/install.env' \
-  'ExecStart=/usr/bin/docker compose -f compose.yaml -f vminstall/compose.vm.yaml --env-file /etc/remote-chrome/compose.env up -d' \
+  'ExecStart=/usr/bin/docker compose --project-name remote-chrome -f compose.yaml -f vminstall/compose.vm.yaml --env-file /etc/remote-chrome/compose.env up -d' \
   'ExecStartPost=/usr/local/sbin/remote-chrome wait-ready' \
-  'ExecStop=/usr/bin/docker compose -f compose.yaml -f vminstall/compose.vm.yaml --env-file /etc/remote-chrome/compose.env down'; do
+  'ExecStop=/usr/bin/docker compose --project-name remote-chrome -f compose.yaml -f vminstall/compose.vm.yaml --env-file /etc/remote-chrome/compose.env down'; do
   grep -Fxq "$fixed_service_line" "$service_candidate" ||
     fail "systemd service must render fixed absolute paths: $fixed_service_line"
 done
@@ -810,7 +810,7 @@ assert_order "$REMOTE_CHROME_TRANSITION_LOG" \
   current-switched config-installed service-reloaded service-started \
   health-verified public-verified active-recorded backup-timer-configured
 assert_order "$fake_log" \
-  "docker <compose> <-f> <$REMOTE_CHROME_INSTALL_ROOT/releases/v2.0.0/compose.yaml> <-f> <$REMOTE_CHROME_INSTALL_ROOT/releases/v2.0.0/vminstall/compose.vm.yaml> <--env-file> <$REMOTE_CHROME_CONFIG_ROOT/compose.env.candidate> <config> <--quiet>" \
+  "docker <compose> <--project-name> <remote-chrome> <-f> <$REMOTE_CHROME_INSTALL_ROOT/releases/v2.0.0/compose.yaml> <-f> <$REMOTE_CHROME_INSTALL_ROOT/releases/v2.0.0/vminstall/compose.vm.yaml> <--env-file> <$REMOTE_CHROME_CONFIG_ROOT/compose.env.candidate> <config> <--quiet>" \
   "systemctl <daemon-reload>" \
   "systemctl <enable> <--now> <remote-chrome.service>"
 [[ -x $REMOTE_CHROME_CLI_ROOT/remote-chrome ]] ||
