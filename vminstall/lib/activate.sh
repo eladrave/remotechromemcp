@@ -43,6 +43,21 @@ vm_run_bounded() {
   vm_run_with_timeout "$seconds" "$@"
 }
 
+vm_service_timeout() {
+  local value=${REMOTE_CHROME_SERVICE_TIMEOUT:-300}
+  vm_validate_integer_bound "$value" 30 600 || {
+    printf 'ERROR: REMOTE_CHROME_SERVICE_TIMEOUT must be between 30 and 600\n' >&2
+    return 64
+  }
+  printf '%s' "$value"
+}
+
+vm_run_service_control() {
+  local seconds
+  seconds=$(vm_service_timeout) || return $?
+  vm_run_with_timeout "$seconds" systemctl "$@"
+}
+
 vm_compose_for_release() {
   local release=$1 env_file=$2
   shift 2
@@ -537,7 +552,7 @@ vm_rollback_release() {
   local previous_target=$1 snapshot=$2 candidate_release=$3
   local rollback_failed=0 prior_health_failed=0
   vm_stop_candidate_release "$candidate_release" || rollback_failed=1
-  vm_run_bounded systemctl stop remote-chrome.service || rollback_failed=1
+  vm_run_service_control stop remote-chrome.service || rollback_failed=1
   vm_run_bounded systemctl disable remote-chrome.service || rollback_failed=1
   vm_run_bounded systemctl disable --now remote-chrome-backup.timer \
     >/dev/null 2>&1 || true
@@ -555,7 +570,7 @@ vm_rollback_release() {
       rollback_failed=1
   fi
   if [[ -f $snapshot/service.active ]]; then
-    vm_run_bounded systemctl start remote-chrome.service || rollback_failed=1
+    vm_run_service_control start remote-chrome.service || rollback_failed=1
     if [[ -z $previous_target ]] || ! REMOTE_CHROME_ROLLBACK=1 \
       vm_wait_stack_health "$REMOTE_CHROME_INSTALL_ROOT/$previous_target"; then
       prior_health_failed=1
@@ -626,7 +641,7 @@ vm_activate_release() {
      vm_activation_transition config-installed &&
      vm_run_bounded systemctl daemon-reload &&
      vm_activation_transition service-reloaded &&
-     vm_run_bounded systemctl enable --now remote-chrome.service &&
+     vm_run_service_control enable --now remote-chrome.service &&
      vm_activation_transition service-started &&
      vm_activation_transition health-verified &&
      vm_activation_transition public-verified &&
