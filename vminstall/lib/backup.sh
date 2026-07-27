@@ -18,17 +18,8 @@ vm_backup_validate_data_root() {
 
 vm_backup_validate_gcs_uri() {
   local uri=$1 bucket=${GCS_BUCKET:-}
-  [[ -n $bucket &&
-     ${#bucket} -ge 3 &&
-     ${#bucket} -le 63 &&
-     $bucket =~ ^[a-z0-9][a-z0-9.-]*[a-z0-9]$ &&
-     $bucket != *..* &&
-     $bucket != *.-* &&
-     $bucket != *-.*
-  ]] || return 64
-  [[ ! $bucket =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ &&
-     $uri == "gs://$bucket/"*
-  ]] || return 64
+  vm_validate_gcs_bucket "$bucket" || return 64
+  [[ $uri == "gs://$bucket/"* ]] || return 64
   local object=${uri#gs://"$bucket"/} component
   [[ -n $object &&
      $object != *'//'* &&

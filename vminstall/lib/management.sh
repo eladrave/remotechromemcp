@@ -53,6 +53,7 @@ vm_management_load_installed_state() {
   vm_validate_domain "$DOMAIN" &&
     vm_validate_email "$ACME_EMAIL" &&
     vm_validate_config_value "$REMOTE_CHROME_DATA_DIR" &&
+    { [[ -z $GCS_BUCKET ]] || vm_validate_gcs_bucket "$GCS_BUCKET"; } &&
     [[ $MCP_URL == "https://$DOMAIN/mcp" &&
        $LOGIN_URL == "https://$DOMAIN/login/" ]]
 }

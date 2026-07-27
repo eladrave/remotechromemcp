@@ -44,7 +44,7 @@ initialization before printing the handoff.
 Automated production installation must select an immutable release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/eladrave/remotechromemcp/master/vminstall/install.sh | sudo sh -s -- --version v1.0.0
+curl -fsSL https://raw.githubusercontent.com/eladrave/remotechromemcp/v1.0.0/vminstall/install.sh | sudo sh -s -- --version v1.0.0
 ```
 
 The pinned command is not live until the matching `v1.0.0` tag and release
@@ -54,7 +54,7 @@ it appears in this example.
 For noninteractive automation, provide every required value explicitly:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/eladrave/remotechromemcp/master/vminstall/install.sh |
+curl -fsSL https://raw.githubusercontent.com/eladrave/remotechromemcp/v1.0.0/vminstall/install.sh |
   sudo sh -s -- \
     --version v1.0.0 \
     --non-interactive \

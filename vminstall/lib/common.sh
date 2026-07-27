@@ -111,8 +111,11 @@ vm_validate_email() {
 vm_validate_gcs_bucket() {
   local bucket=${1:-}
   ((${#bucket} >= 3 && ${#bucket} <= 63)) &&
-    [[ $bucket =~ ^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$ ]] &&
-    [[ $bucket != *..* ]]
+    [[ $bucket =~ ^[a-z0-9][a-z0-9.-]*[a-z0-9]$ ]] &&
+    [[ $bucket != *..* &&
+       $bucket != *.-* &&
+       $bucket != *-.* ]] &&
+    [[ ! $bucket =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
 }
 
 vm_gcloud_path() {

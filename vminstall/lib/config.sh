@@ -310,11 +310,51 @@ vm_load_installed_configuration() {
   vm_merge_installed_configuration
 }
 
+vm_migrate_runtime_directory() {
+  local destination=$1 owner=$2
+  local current_owner current_mode root_device device_output device
+  local owner_output entry_owner tree_correct=1
+  vm_require_management_destination "$destination" || return 1
+  [[ $owner =~ ^[0-9]+:[0-9]+$ ]] || return 1
+  [[ -d $destination && ! -L $destination ]] || return 1
+
+  current_owner=$(stat -c '%u:%g' -- "$destination") || return 1
+  current_mode=$(stat -c '%a' -- "$destination") || return 1
+  root_device=$(stat -c '%d' -- "$destination") || return 1
+  device_output=$(
+    find -P "$destination" -xdev -exec stat -c '%d' -- {} \;
+  ) || return 1
+  while IFS= read -r device; do
+    [[ -n $device && $device == "$root_device" ]] || return 1
+  done <<<"$device_output"
+  owner_output=$(
+    find -P "$destination" -xdev -exec stat -c '%u:%g' -- {} \;
+  ) || return 1
+  while IFS= read -r entry_owner; do
+    [[ -n $entry_owner ]] || return 1
+    [[ $entry_owner == "$owner" ]] || tree_correct=0
+  done <<<"$owner_output"
+  if [[ $current_owner == "$owner" &&
+        $current_mode == 700 &&
+        $tree_correct == 1 ]]; then
+    return 0
+  fi
+
+  vm_require_management_destination "$destination" || return 1
+  [[ -d $destination && ! -L $destination ]] || return 1
+  find -P "$destination" -xdev \
+    -exec chown -h "$owner" -- {} + || return 1
+  chmod 0700 "$destination" || return 1
+}
+
 vm_create_runtime_directory() {
   local destination=$1 owner=${2:-}
   vm_require_management_destination "$destination" || return 1
   if [[ -e $destination || -L $destination ]]; then
     [[ -d $destination && ! -L $destination ]] || return 1
+    if [[ -n $owner ]]; then
+      vm_migrate_runtime_directory "$destination" "$owner" || return 1
+    fi
     return 0
   fi
   install -d -m 0700 "$destination" || return 1

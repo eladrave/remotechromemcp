@@ -306,6 +306,32 @@ apply_patch_fake "$fake_bin/find" \
   'if [[ ${REMOTE_CHROME_FAKE_FIND_HANG:-0} == 1 ]]; then exec /bin/sleep 30; fi' \
   'exec /usr/bin/find "$@"'
 
+apply_patch_fake "$fake_bin/stat" \
+  'format=' \
+  'if [[ ${1:-} == -c ]]; then format=${2:-}; fi' \
+  'target=${!#}' \
+  'if [[ -n ${REMOTE_CHROME_FAKE_LEGACY_PATH:-} && $target == "$REMOTE_CHROME_FAKE_LEGACY_PATH" && $format == "%u:%g" ]]; then' \
+  '  printf "%s\n" "0:0"' \
+  '  exit 0' \
+  'fi' \
+  'if [[ -n ${REMOTE_CHROME_FAKE_CORRECT_PATH:-} && $target == "$REMOTE_CHROME_FAKE_CORRECT_PATH" && $format == "%u:%g" ]]; then' \
+  '  printf "%s\n" "10001:10001"' \
+  '  exit 0' \
+  'fi' \
+  'if [[ -n ${REMOTE_CHROME_FAKE_CORRECT_RUNTIME_ROOT:-} && $format == "%u:%g" ]]; then' \
+  '  case "$target" in' \
+  '    "$REMOTE_CHROME_FAKE_CORRECT_RUNTIME_ROOT/profile"|"$REMOTE_CHROME_FAKE_CORRECT_RUNTIME_ROOT/profile/"*|"$REMOTE_CHROME_FAKE_CORRECT_RUNTIME_ROOT/caddy-data"|"$REMOTE_CHROME_FAKE_CORRECT_RUNTIME_ROOT/caddy-data/"*|"$REMOTE_CHROME_FAKE_CORRECT_RUNTIME_ROOT/caddy-config"|"$REMOTE_CHROME_FAKE_CORRECT_RUNTIME_ROOT/caddy-config/"*)' \
+  '      printf "%s\n" "10001:10001"' \
+  '      exit 0' \
+  '      ;;' \
+  '  esac' \
+  'fi' \
+  'if [[ -n ${REMOTE_CHROME_FAKE_CROSS_DEVICE_PATH:-} && $target == "$REMOTE_CHROME_FAKE_CROSS_DEVICE_PATH" && $format == "%d" ]]; then' \
+  '  printf "%s\n" "999999999"' \
+  '  exit 0' \
+  'fi' \
+  'exec /usr/bin/stat "$@"'
+
 export PATH="$fake_bin:$PATH"
 export REMOTE_CHROME_SKIP_MAIN=1
 # shellcheck source=../vminstall/installer-main.sh
@@ -314,7 +340,7 @@ source vminstall/installer-main.sh
 for required_function in \
   vm_prepare_config vm_generate_credentials vm_render_compose_env \
   vm_activate_release vm_rollback_release vm_verify_public_stack \
-  vm_print_connection_handoff; do
+  vm_print_connection_handoff vm_migrate_runtime_directory; do
   declare -F "$required_function" >/dev/null ||
     fail "$required_function is undefined"
 done
@@ -322,6 +348,108 @@ done
 REMOTE_CHROME_TEST_ROOT="$test_root/first-install"
 mkdir "$REMOTE_CHROME_TEST_ROOT"
 vm_init_paths
+
+migration_root="$REMOTE_CHROME_TEST_ROOT/migration"
+migration_escape="$REMOTE_CHROME_TEST_ROOT/migration-escape"
+mkdir -p "$migration_root/profile/nested" "$migration_escape"
+printf 'profile-content\n' >"$migration_root/profile/nested/content"
+printf 'outside-content\n' >"$migration_escape/sentinel"
+ln -s "$migration_escape/sentinel" \
+  "$migration_root/profile/nested/external-link"
+chmod 0755 "$migration_root/profile"
+export REMOTE_CHROME_FAKE_LEGACY_PATH="$migration_root/profile"
+migration_chowns_before=$(grep -c '^chown <-h> <10001:10001>' "$fake_log" || true)
+vm_migrate_runtime_directory "$migration_root/profile" 10001:10001 ||
+  fail 'legacy profile ownership and mode must migrate safely'
+[[ $(stat -c '%a' "$migration_root/profile") == 700 ]] ||
+  fail 'legacy profile migration must set the exact managed directory to mode 0700'
+[[ $(<"$migration_root/profile/nested/content") == profile-content &&
+   $(<"$migration_escape/sentinel") == outside-content ]] ||
+  fail 'legacy profile migration must preserve content and external targets'
+[[ -L $migration_root/profile/nested/external-link &&
+   $(readlink "$migration_root/profile/nested/external-link") == \
+     "$migration_escape/sentinel" ]] ||
+  fail 'legacy profile migration must preserve descendant symlinks'
+[[ $(grep -c '^chown <-h> <10001:10001>' "$fake_log") \
+   -gt $migration_chowns_before ]] ||
+  fail 'legacy profile migration must use no-dereference ownership changes'
+unset REMOTE_CHROME_FAKE_LEGACY_PATH
+
+ln -s "$migration_escape" "$migration_root/caddy-data"
+if vm_migrate_runtime_directory \
+  "$migration_root/caddy-data" 10001:10001 >/dev/null 2>&1; then
+  fail 'an exact managed bind-directory symlink must be rejected'
+fi
+
+ln -s "$migration_escape" "$migration_root/data-root-link"
+if vm_create_data_root "$migration_root/data-root-link" >/dev/null 2>&1; then
+  fail 'a symlink at the canonical data root must be rejected'
+fi
+
+mkdir -p "$migration_root/caddy-config/device-boundary"
+printf 'device-content\n' \
+  >"$migration_root/caddy-config/device-boundary/content"
+chmod 0755 "$migration_root/caddy-config"
+export REMOTE_CHROME_FAKE_LEGACY_PATH="$migration_root/caddy-config"
+export REMOTE_CHROME_FAKE_CROSS_DEVICE_PATH="$migration_root/caddy-config/device-boundary"
+migration_chowns_before=$(grep -c '^chown <-h> <10001:10001>' "$fake_log" || true)
+if vm_migrate_runtime_directory \
+  "$migration_root/caddy-config" 10001:10001 >/dev/null 2>&1; then
+  fail 'managed bind migration must reject a cross-filesystem boundary'
+fi
+[[ $(grep -c '^chown <-h> <10001:10001>' "$fake_log") \
+   -eq $migration_chowns_before ]] ||
+  fail 'cross-filesystem rejection must occur before ownership mutation'
+[[ $(<"$migration_root/caddy-config/device-boundary/content") == \
+   device-content ]] ||
+  fail 'cross-filesystem rejection must preserve all content'
+unset REMOTE_CHROME_FAKE_LEGACY_PATH REMOTE_CHROME_FAKE_CROSS_DEVICE_PATH
+
+mkdir -p "$migration_root/root-correct/legacy-child"
+chmod 0700 "$migration_root/root-correct"
+printf 'legacy-child-content\n' \
+  >"$migration_root/root-correct/legacy-child/content"
+export REMOTE_CHROME_FAKE_CORRECT_PATH="$migration_root/root-correct"
+export REMOTE_CHROME_FAKE_LEGACY_PATH="$migration_root/root-correct/legacy-child"
+migration_chowns_before=$(grep -c '^chown <-h> <10001:10001>' "$fake_log" || true)
+vm_migrate_runtime_directory "$migration_root/root-correct" 10001:10001 ||
+  fail 'wrong-owned descendants beneath a correct root must migrate'
+[[ $(grep -c '^chown <-h> <10001:10001>' "$fake_log") \
+   -gt $migration_chowns_before ]] ||
+  fail 'descendant ownership must participate in the migration decision'
+[[ $(<"$migration_root/root-correct/legacy-child/content") == \
+   legacy-child-content ]] ||
+  fail 'descendant ownership migration must preserve content'
+unset REMOTE_CHROME_FAKE_CORRECT_PATH REMOTE_CHROME_FAKE_LEGACY_PATH
+
+mkdir "$migration_root/already-correct"
+chmod 0700 "$migration_root/already-correct"
+export REMOTE_CHROME_FAKE_CORRECT_PATH="$migration_root/already-correct"
+migration_chowns_before=$(grep -c '^chown <-h> <10001:10001>' "$fake_log" || true)
+vm_migrate_runtime_directory "$migration_root/already-correct" 10001:10001 ||
+  fail 'already-correct bind directory must validate'
+[[ $(grep -c '^chown <-h> <10001:10001>' "$fake_log") \
+   -eq $migration_chowns_before ]] ||
+  fail 'already-correct rerun must avoid redundant recursive ownership work'
+unset REMOTE_CHROME_FAKE_CORRECT_PATH
+
+mkdir -p "$migration_root/symlink-owner"
+chmod 0700 "$migration_root/symlink-owner"
+ln -s "$migration_escape/sentinel" \
+  "$migration_root/symlink-owner/wrong-owned-link"
+export REMOTE_CHROME_FAKE_CORRECT_PATH="$migration_root/symlink-owner"
+export REMOTE_CHROME_FAKE_LEGACY_PATH="$migration_root/symlink-owner/wrong-owned-link"
+migration_chowns_before=$(grep -c '^chown <-h> <10001:10001>' "$fake_log" || true)
+vm_migrate_runtime_directory "$migration_root/symlink-owner" 10001:10001 ||
+  fail 'wrong-owned descendant symlinks must migrate without dereferencing'
+[[ $(grep -c '^chown <-h> <10001:10001>' "$fake_log") \
+   -gt $migration_chowns_before ]] ||
+  fail 'descendant symlink ownership must participate in the no-op decision'
+[[ -L $migration_root/symlink-owner/wrong-owned-link &&
+   $(<"$migration_escape/sentinel") == outside-content ]] ||
+  fail 'descendant symlink migration must not mutate its external target'
+unset REMOTE_CHROME_FAKE_CORRECT_PATH REMOTE_CHROME_FAKE_LEGACY_PATH
+
 DOMAIN=chrome.example.com
 ACME_EMAIL=ops@example.com
 REMOTE_CHROME_DATA_DIR="$REMOTE_CHROME_TEST_ROOT/data/../data"
@@ -391,6 +519,7 @@ done
 initial_profile_chowns=$(
   grep -Fxc "chown <10001:10001> <$canonical_data/profile>" "$fake_log"
 )
+export REMOTE_CHROME_FAKE_CORRECT_RUNTIME_ROOT="$canonical_data"
 touch "$canonical_data/caddy-data/preserve" "$canonical_data/caddy-config/preserve"
 
 grep -Fxq "LOGIN_PASSWORD_HASH='$first_hash'" "$compose_candidate" ||

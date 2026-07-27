@@ -38,31 +38,17 @@ head_commit="$(git -C "$repo_dir" rev-parse --verify HEAD)"
 }
 
 mkdir -p "$dist_dir"
-stage="$(mktemp -d "$dist_dir/.package-${version}.XXXXXX")"
-backup="$stage/prior"
-stage_archive="$stage/$archive_name"
-stage_checksum="$stage/$checksum_name"
-install_started=0
-had_prior=0
+stage="$(mktemp -d "$repo_dir/.remotechromemcp-package-${version}.XXXXXX")"
+generated="$stage/generated"
+staged_dist="$stage/dist"
+stage_archive="$generated/$archive_name"
+stage_checksum="$generated/$checksum_name"
+mkdir -p "$generated"
 
 cleanup() {
   local status=$?
   trap - EXIT HUP INT TERM
 
-  if ((status != 0 && install_started == 1)); then
-    if ((had_prior == 0)); then
-      rm -f -- "$archive" "$checksum"
-    else
-      if [[ -f $backup/$archive_name ]]; then
-        rm -f -- "$archive"
-        mv -- "$backup/$archive_name" "$archive"
-      fi
-      if [[ -f $backup/$checksum_name ]]; then
-        rm -f -- "$checksum"
-        mv -- "$backup/$checksum_name" "$checksum"
-      fi
-    fi
-  fi
   rm -rf -- "$stage"
   exit "$status"
 }
@@ -73,10 +59,54 @@ package_signal() {
   exit "$status"
 }
 
+publish_dist_exchange() {
+  /usr/bin/python3 - "$staged_dist" "$dist_dir" <<'PY'
+import ctypes
+import os
+import sys
+
+libc = ctypes.CDLL(None, use_errno=True)
+renameat2 = libc.renameat2
+renameat2.argtypes = [
+    ctypes.c_int,
+    ctypes.c_char_p,
+    ctypes.c_int,
+    ctypes.c_char_p,
+    ctypes.c_uint,
+]
+renameat2.restype = ctypes.c_int
+at_fdcwd = -100
+rename_exchange = 2
+result = renameat2(
+    at_fdcwd,
+    os.fsencode(sys.argv[1]),
+    at_fdcwd,
+    os.fsencode(sys.argv[2]),
+    rename_exchange,
+)
+if result != 0:
+    error = ctypes.get_errno()
+    raise OSError(error, os.strerror(error))
+PY
+}
+
 trap cleanup EXIT
 trap 'package_signal 129' HUP
 trap 'package_signal 130' INT
 trap 'package_signal 143' TERM
+
+git -C "$repo_dir" archive \
+  --format=tar.gz \
+  --prefix="remotechromemcp-${version}/" \
+  --output="$stage_archive" \
+  "$tag_ref"
+(cd "$generated" && sha256sum "$archive_name" >"$checksum_name")
+(cd "$generated" && sha256sum -c "$checksum_name") >/dev/null
+first_member="$(tar -tzf "$stage_archive" | sed -n '1p')"
+[[ $first_member == "remotechromemcp-${version}/"* ]] || {
+    printf 'Release archive has an invalid prefix\n' >&2
+    exit 1
+  }
 
 if [[ -e $archive || -e $checksum ]]; then
   [[ -f $archive && ! -L $archive && -f $checksum && ! -L $checksum ]] || {
@@ -87,30 +117,21 @@ if [[ -e $archive || -e $checksum ]]; then
     printf 'Existing release output has an invalid checksum: %s\n' "$version" >&2
     exit 1
   }
-  had_prior=1
+  if cmp -s -- "$archive" "$stage_archive" &&
+     cmp -s -- "$checksum" "$stage_checksum"; then
+    printf '%s\n%s\n' "$archive" "$checksum"
+    exit 0
+  fi
+  printf 'Existing release output differs from immutable tag: %s\n' \
+    "$version" >&2
+  exit 1
 fi
 
-git -C "$repo_dir" archive \
-  --format=tar.gz \
-  --prefix="remotechromemcp-${version}/" \
-  --output="$stage_archive" \
-  "$tag_ref"
-(cd "$stage" && sha256sum "$archive_name" >"$checksum_name")
-(cd "$stage" && sha256sum -c "$checksum_name") >/dev/null
-first_member="$(tar -tzf "$stage_archive" | sed -n '1p')"
-[[ $first_member == "remotechromemcp-${version}/"* ]] || {
-    printf 'Release archive has an invalid prefix\n' >&2
-    exit 1
-  }
-
-mkdir -p "$backup"
-install_started=1
-if ((had_prior == 1)); then
-  mv -- "$archive" "$backup/$archive_name"
-  mv -- "$checksum" "$backup/$checksum_name"
-fi
-mv -- "$stage_archive" "$archive"
-mv -- "$stage_checksum" "$checksum"
-install_started=0
+mkdir -p "$staged_dist"
+cp -a -- "$dist_dir/." "$staged_dist/"
+cp -- "$stage_archive" "$staged_dist/$archive_name"
+cp -- "$stage_checksum" "$staged_dist/$checksum_name"
+(cd "$staged_dist" && sha256sum -c "$checksum_name") >/dev/null
+publish_dist_exchange
 
 printf '%s\n%s\n' "$archive" "$checksum"

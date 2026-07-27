@@ -33,6 +33,29 @@ vm_validate_email admin@example.com ||
 ! vm_validate_email admin ||
   fail 'email must require a domain'
 
+bucket_63=$(printf 'a%.0s' {1..63})
+for valid_bucket in abc a-b.c "$bucket_63"; do
+  vm_validate_gcs_bucket "$valid_bucket" ||
+    fail "valid GCS bucket must be accepted: $valid_bucket"
+done
+bucket_64=$(printf 'a%.0s' {1..64})
+for invalid_bucket in \
+  ab \
+  "$bucket_64" \
+  bad_bucket \
+  Badbucket \
+  a..b \
+  a.-b \
+  a-.b \
+  192.168.1.1 \
+  .abc \
+  abc. \
+  -abc \
+  abc-; do
+  ! vm_validate_gcs_bucket "$invalid_bucket" ||
+    fail "invalid GCS bucket must be rejected: $invalid_bucket"
+done
+
 vm_validate_data_dir /var/lib/remote-chrome ||
   fail 'safe absolute data directory must be accepted'
 ln -s /etc "$test_root/protected-root-link"

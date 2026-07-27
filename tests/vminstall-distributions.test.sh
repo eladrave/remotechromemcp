@@ -401,6 +401,17 @@ assert_no_mutations
 
 reset_fakes
 export REMOTE_CHROME_TEST_ROOT="$test_root"
+run_main_expect_failure 2 \
+  --domain chrome.example.com \
+  --email admin@example.com \
+  --data-dir "$test_root/data" \
+  --gcs-bucket bad_bucket \
+  --non-interactive \
+  --skip-dns-check
+assert_no_mutations
+
+reset_fakes
+export REMOTE_CHROME_TEST_ROOT="$test_root"
 FAKE_DOMAIN_IP=198.51.100.40
 FAKE_PUBLIC_IP=203.0.113.10
 export FAKE_DOMAIN_IP FAKE_PUBLIC_IP

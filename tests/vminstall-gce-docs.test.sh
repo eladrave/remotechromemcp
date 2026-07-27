@@ -134,9 +134,14 @@ assert_before "$gce_doc" 'lsblk' 'mkfs.ext4'
 assert_before "$gce_doc" 'blkid' 'mkfs.ext4'
 
 quick_command='curl -fsSL https://raw.githubusercontent.com/eladrave/remotechromemcp/master/vminstall/install.sh | sudo sh'
-pinned_command='curl -fsSL https://raw.githubusercontent.com/eladrave/remotechromemcp/master/vminstall/install.sh | sudo sh -s -- --version v1.0.0'
+pinned_command='curl -fsSL https://raw.githubusercontent.com/eladrave/remotechromemcp/v1.0.0/vminstall/install.sh | sudo sh -s -- --version v1.0.0'
 require_literal "$vm_doc" "$quick_command"
 require_literal "$vm_doc" "$pinned_command"
+if grep -Eq \
+  'raw[.]githubusercontent[.]com/eladrave/remotechromemcp/master/vminstall/install[.]sh.*--version[[:space:]]+v[0-9]+\.[0-9]+\.[0-9]+' \
+  "$vm_doc" skills/remote-chrome-mcp/SKILL.md; then
+  fail 'pinned or production guidance must never execute the moving master bootstrap'
+fi
 
 vm_concepts=(
   'Ubuntu 22.04'
@@ -177,6 +182,11 @@ package_repo="$package_tmp/repo"
 mkdir -p "$package_repo/scripts"
 cp "$packager" "$package_repo/scripts/package-release.sh"
 chmod +x "$package_repo/scripts/package-release.sh"
+grep -Fq 'mktemp -d "$repo_dir/' "$package_repo/scripts/package-release.sh" ||
+  fail 'release staging must be a same-filesystem sibling of dist inside the repository'
+grep -Fq '/usr/bin/python3 - "$staged_dist" "$dist_dir"' \
+  "$package_repo/scripts/package-release.sh" ||
+  fail 'atomic publication must use the trusted system Python interpreter'
 git -C "$package_repo" init -q
 git -C "$package_repo" config user.name 'Release Contract'
 git -C "$package_repo" config user.email release-contract@example.test
@@ -199,55 +209,108 @@ first_archive_member="$(tar -tzf "$archive" | sed -n '1p')"
 [[ $first_archive_member == remotechromemcp-v1.0.0/* ]] ||
   fail 'archive prefix is not deterministic'
 first_hash="$(sha256sum "$archive" | cut -d' ' -f1)"
-"$package_repo/scripts/package-release.sh" v1.0.0 >/dev/null
-second_hash="$(sha256sum "$archive" | cut -d' ' -f1)"
-[[ $first_hash == "$second_hash" ]] || fail 'repeated packaging is not reproducible'
+first_archive_identity=$(stat -c '%i:%s:%Y' "$archive")
+first_checksum_identity=$(stat -c '%i:%s:%Y' "$checksum")
+cp "$archive" "$package_tmp/original-archive"
+cp "$checksum" "$package_tmp/original-checksum"
 
 fake_bin="$package_tmp/fake-bin"
 mkdir -p "$fake_bin"
 cat >"$fake_bin/mv" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-count=0
-[[ ! -f $FAKE_MV_STATE ]] || count="$(cat "$FAKE_MV_STATE")"
-count=$((count + 1))
-printf '%s\n' "$count" >"$FAKE_MV_STATE"
-if [[ -n ${FAKE_MV_SIGNAL_AT:-} && $count -eq $FAKE_MV_SIGNAL_AT ]]; then
-  kill -TERM "$PPID"
-  sleep 1
-  exit 143
-fi
-if [[ -n ${FAKE_MV_FAIL_AT:-} && $count -eq $FAKE_MV_FAIL_AT ]]; then
-  exit 73
-fi
-exec /usr/bin/mv "$@"
+printf 'mv attempted\n' >"$FAKE_MV_MARKER"
+kill -KILL "$PPID"
+exit 137
 EOF
 chmod +x "$fake_bin/mv"
-for fail_at in 1 2 3 4; do
-  rm -f "$package_tmp/mv-state"
-  if PATH="$fake_bin:$PATH" FAKE_MV_STATE="$package_tmp/mv-state" \
-    FAKE_MV_FAIL_AT="$fail_at" \
-    "$package_repo/scripts/package-release.sh" v1.0.0 >/dev/null 2>&1; then
-    fail "packager accepted asset move failure $fail_at"
-  fi
-  [[ $(sha256sum "$archive" | cut -d' ' -f1) == "$first_hash" ]] ||
-    fail "asset move failure $fail_at damaged the prior archive"
-  (cd "$package_repo/dist" &&
-    sha256sum -c "$(basename "$checksum")") >/dev/null ||
-    fail "asset move failure $fail_at damaged the prior checksum pair"
-done
-
-rm -f "$package_tmp/mv-state"
-if PATH="$fake_bin:$PATH" FAKE_MV_STATE="$package_tmp/mv-state" \
-  FAKE_MV_SIGNAL_AT=4 \
+if ! PATH="$fake_bin:$PATH" FAKE_MV_MARKER="$package_tmp/mv-marker" \
   "$package_repo/scripts/package-release.sh" v1.0.0 >/dev/null 2>&1; then
-  fail 'packager reported success after an interruption during replacement'
+  fail 'identical immutable package pair must succeed without replacement'
 fi
+[[ ! -e $package_tmp/mv-marker ]] ||
+  fail 'identical immutable package pair attempted a move'
 [[ $(sha256sum "$archive" | cut -d' ' -f1) == "$first_hash" ]] ||
-  fail 'interrupted replacement damaged the prior archive'
+  fail 'identical immutable package pair changed archive bytes'
 (cd "$package_repo/dist" &&
   sha256sum -c "$(basename "$checksum")") >/dev/null ||
-  fail 'interrupted replacement damaged the prior checksum pair'
+  fail 'identical immutable package pair damaged its checksum'
+[[ $(stat -c '%i:%s:%Y' "$archive") == "$first_archive_identity" &&
+   $(stat -c '%i:%s:%Y' "$checksum") == "$first_checksum_identity" ]] ||
+  fail 'identical immutable package pair changed published file identity'
+
+rm "$checksum"
+incomplete_archive_hash=$(sha256sum "$archive")
+if "$package_repo/scripts/package-release.sh" v1.0.0 >/dev/null 2>&1; then
+  fail 'packager accepted an incomplete existing release pair'
+fi
+[[ ! -e $checksum && $(sha256sum "$archive") == "$incomplete_archive_hash" ]] ||
+  fail 'incomplete existing pair rejection mutated published output'
+cp "$package_tmp/original-checksum" "$checksum"
+
+printf '%064d  %s\n' 0 "$(basename "$archive")" >"$checksum"
+invalid_archive_hash=$(sha256sum "$archive")
+invalid_checksum_hash=$(sha256sum "$checksum")
+if "$package_repo/scripts/package-release.sh" v1.0.0 >/dev/null 2>&1; then
+  fail 'packager accepted an invalid existing checksum'
+fi
+[[ $(sha256sum "$archive") == "$invalid_archive_hash" &&
+   $(sha256sum "$checksum") == "$invalid_checksum_hash" ]] ||
+  fail 'invalid existing checksum rejection mutated published output'
+cp "$package_tmp/original-checksum" "$checksum"
+
+printf 'different immutable archive\n' >"$archive"
+(cd "$package_repo/dist" &&
+  sha256sum "$(basename "$archive")" >"$(basename "$checksum")")
+different_archive_hash=$(sha256sum "$archive")
+different_checksum_hash=$(sha256sum "$checksum")
+if "$package_repo/scripts/package-release.sh" v1.0.0 >/dev/null 2>&1; then
+  fail 'packager accepted a different valid pair for an immutable tag'
+fi
+[[ $(sha256sum "$archive") == "$different_archive_hash" &&
+   $(sha256sum "$checksum") == "$different_checksum_hash" ]] ||
+  fail 'different immutable pair rejection mutated published output'
+cp "$package_tmp/original-archive" "$archive"
+cp "$package_tmp/original-checksum" "$checksum"
+
+crash_bin="$package_tmp/crash-bin"
+mkdir "$crash_bin"
+cat >"$crash_bin/python3" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+/usr/bin/python3 "$@"
+if [[ ${FAKE_EXCHANGE_CRASH:-0} == 1 ]]; then
+  printf 'exchange completed\n' >"$FAKE_EXCHANGE_MARKER"
+  kill -KILL "$PPID"
+  exit 137
+fi
+EOF
+chmod +x "$crash_bin/python3"
+sed -i \
+  's|/usr/bin/python3 - "$staged_dist" "$dist_dir"|'\
+"$crash_bin"'/python3 - "$staged_dist" "$dist_dir"|' \
+  "$package_repo/scripts/package-release.sh"
+git -C "$package_repo" add scripts/package-release.sh
+git -C "$package_repo" commit -qm 'inject controlled publication crash'
+git -C "$package_repo" tag -fa v1.0.0 -m v1.0.0
+rm "$archive" "$checksum"
+"$package_repo/scripts/package-release.sh" v1.0.0 >/dev/null
+crash_expected_hash=$(sha256sum "$archive" | cut -d' ' -f1)
+rm "$archive" "$checksum"
+if FAKE_EXCHANGE_CRASH=1 \
+  FAKE_EXCHANGE_MARKER="$package_tmp/exchange-marker" \
+  "$package_repo/scripts/package-release.sh" v1.0.0 >/dev/null 2>&1; then
+  fail 'post-publication SIGKILL fixture unexpectedly reported success'
+fi
+[[ -f $package_tmp/exchange-marker ]] ||
+  fail 'post-publication SIGKILL fixture did not reach the atomic exchange'
+[[ -f $archive && -f $checksum ]] ||
+  fail 'post-publication SIGKILL left an incomplete first release pair'
+[[ $(sha256sum "$archive" | cut -d' ' -f1) == "$crash_expected_hash" ]] ||
+  fail 'post-publication SIGKILL changed first-publication archive bytes'
+(cd "$package_repo/dist" &&
+  sha256sum -c "$(basename "$checksum")") >/dev/null ||
+  fail 'post-publication SIGKILL left an invalid first release pair'
 
 printf 'dirty tracked\n' >>"$package_repo/payload.txt"
 if "$package_repo/scripts/package-release.sh" v1.0.0 >/dev/null 2>&1; then
@@ -264,7 +327,7 @@ git -C "$package_repo" tag -d v1.0.0 >/dev/null
 if "$package_repo/scripts/package-release.sh" v1.0.0 >/dev/null 2>&1; then
   fail 'packager accepted a missing release tag'
 fi
-[[ $(sha256sum "$archive" | cut -d' ' -f1) == "$first_hash" ]] ||
+[[ $(sha256sum "$archive" | cut -d' ' -f1) == "$crash_expected_hash" ]] ||
   fail 'failed packaging damaged the prior archive'
 (cd "$package_repo/dist" && sha256sum -c "$(basename "$checksum")") >/dev/null ||
   fail 'failed packaging damaged the prior checksum pair'

@@ -548,6 +548,12 @@ backup_rejects_invalid_gcs_prefix() {
     fail 'backup must reject traversal in the GCS object prefix'
   ! vm_backup_profile gs://other-bucket/remote-chrome ||
     fail 'backup must reject a bucket other than the configured bucket'
+  for invalid_bucket in \
+    bad_bucket Badbucket a..b a.-b a-.b 192.168.1.1; do
+    GCS_BUCKET=$invalid_bucket
+    ! vm_backup_profile "gs://$invalid_bucket/remote-chrome" ||
+      fail "backup must reject invalid configured bucket: $invalid_bucket"
+  done
   [[ ! -e $FAKE_BROWSER_STOPPED && ! -s $FAKE_COMMAND_LOG ]] ||
     fail 'invalid GCS destinations must fail before health or quiescing'
 }

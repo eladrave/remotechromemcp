@@ -43,9 +43,9 @@ backup preference. The guided installer reads answers from `/dev/tty`.
 
 Use the raw GitHub `master` installer only after the user explicitly chooses a
 guided latest install. For production automation, use an immutable release tag
-through `--version` and provide every required noninteractive flag. Do not call
-a documented example version live until its tag, release assets, and CI result
-exist.
+in both the bootstrap URL and `--version`, and provide every required
+noninteractive flag. Do not call a documented example version live until its
+tag, release assets, and CI result exist.
 
 Never guess a block-device name and never format a disk. Require the operator to
 inspect the exact stable device path, its mounts, block layout, and filesystem
@@ -134,3 +134,4 @@ data as account changes.
 | The user needs the MCP token next week | Use `sudo remote-chrome credentials` locally in the SSH terminal; never print or paste it in chat. |
 | The user asks to publish internal browser ports | Refuse to expose internal ports; publish only the documented HTTPS service on 443. |
 | The user asks for token or password disclosure in chat | Never put token/password in chat; have the user retrieve it locally. |
+| Production automation uses `v1.0.0` | Fetch `https://raw.githubusercontent.com/eladrave/remotechromemcp/v1.0.0/vminstall/install.sh`, pass `--version v1.0.0`, and never fetch `master` for production. |
