@@ -364,8 +364,8 @@ vm_verify_backup_checksum() {
 vm_restore_profile_locked() (
   local manifest_uri=$1 release timestamp suffix restore_root archive checksum
   local requested_manifest requested_identity requested_timestamp
-  local manifest new_profile rollback failed status=0 preserved=0 completed=0
-  local restart_required=0
+  local manifest new_profile rollback failed status=0 completed=0
+  local candidate_placed=0 exchanged=0 restart_required=0
   local profile_owner profile_mode tar_command chown_command
   vm_backup_validate_gcs_uri "$manifest_uri" || return $?
   [[ $manifest_uri == *.manifest ]] || return 64
@@ -404,15 +404,15 @@ vm_restore_profile_locked() (
   cleanup_restore() {
     local original_status=$?
     trap - EXIT
-    if ((preserved && ! completed)); then
-      report_restore_recovery() {
-        printf '%s\n' \
-          'ERROR: rollback could not be confirmed; recovery retained:' \
-          "  current profile: $REMOTE_CHROME_DATA_DIR/profile" \
-          "  failed candidate: $failed" \
-          "  rollback profile: $rollback" \
-          "  restore staging: $restore_root" >&2
-      }
+    report_restore_recovery() {
+      printf '%s\n' \
+        'ERROR: rollback could not be confirmed; recovery retained:' \
+        "  current profile: $REMOTE_CHROME_DATA_DIR/profile" \
+        "  failed candidate: $failed" \
+        "  rollback profile: $rollback" \
+        "  restore staging: $restore_root" >&2
+    }
+    if ((exchanged && ! completed)); then
       if ! vm_backup_stop_browser "$release"; then
         report_restore_recovery
         vm_backup_start_browser "$release" || true
@@ -429,6 +429,7 @@ vm_restore_profile_locked() (
         report_restore_recovery
         exit 70
       fi
+      exchanged=0
       if ! mv -- "$rollback" "$failed"; then
         vm_backup_start_browser "$release" || true
         vm_backup_health health || true
@@ -449,10 +450,22 @@ vm_restore_profile_locked() (
       fi
     elif ((! completed)); then
       if ((restart_required)); then
-        vm_backup_start_browser "$release" || true
-        vm_backup_health health || true
+        if ! vm_backup_start_browser "$release" ||
+           ! vm_backup_health health; then
+          report_restore_recovery
+          exit 70
+        fi
       fi
-      rm -rf -- "$restore_root"
+      if ((candidate_placed)); then
+        if ! rm -rf -- "$rollback"; then
+          report_restore_recovery
+          exit 70
+        fi
+      fi
+      if ! rm -rf -- "$restore_root"; then
+        report_restore_recovery
+        exit 70
+      fi
     fi
     exit "$original_status"
   }
@@ -478,12 +491,6 @@ vm_restore_profile_locked() (
     "$VM_BACKUP_ARCHIVE_NAME" "$VM_BACKUP_CHECKSUM_NAME" || return 1
   vm_validate_backup_archive "$archive" || return 1
   vm_backup_health pre-health || return $?
-  restart_required=1
-  vm_backup_stop_browser "$release" || return $?
-
-  vm_backup_event preserve || return 1
-  mv -- "$REMOTE_CHROME_DATA_DIR/profile" "$rollback" || return 1
-  preserved=1
   install -d -m 0700 "$new_profile" || return 1
   vm_backup_event extract || return 1
   vm_run_bounded "$tar_command" --extract --gzip --file "$archive" \
@@ -492,7 +499,15 @@ vm_restore_profile_locked() (
   chmod "$profile_mode" "$new_profile" || return 1
   vm_backup_event chown || return 1
   vm_run_bounded "$chown_command" -R "$profile_owner" "$new_profile" || return $?
-  mv -- "$new_profile" "$REMOTE_CHROME_DATA_DIR/profile" || return 1
+  mv -- "$new_profile" "$rollback" || return 1
+  candidate_placed=1
+
+  restart_required=1
+  vm_backup_stop_browser "$release" || return $?
+  vm_backup_event preserve || return 1
+  vm_backup_exchange_profiles \
+    "$REMOTE_CHROME_DATA_DIR/profile" "$rollback" || return $?
+  exchanged=1
   vm_backup_start_browser "$release" || return $?
   vm_backup_health health || return $?
   restart_required=0

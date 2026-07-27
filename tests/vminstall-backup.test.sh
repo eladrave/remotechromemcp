@@ -25,6 +25,11 @@ required_tests=(
   restore_preserves_current_profile
   restore_health_failure_rolls_back
   restore_unconfirmed_rollback_stop_preserves_all
+  restore_extract_failure_keeps_original_canonical
+  restore_candidate_chmod_failure_keeps_original_canonical
+  restore_candidate_chown_failure_keeps_original_canonical
+  restore_candidate_placement_failure_keeps_original_canonical
+  restore_pre_exchange_event_failure_restarts_original
   restore_candidate_profile_rename_failure_preserves_canonical
   restore_rollback_profile_rename_failure_restores_candidate
   restore_combined_rename_failure_keeps_canonical_profile
@@ -89,6 +94,10 @@ cat >"$fake_bin/tar" <<'FAKE'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'tar <%s>\n' "$*" >>"$FAKE_COMMAND_LOG"
+if [[ ${FAKE_TAR_EXTRACT_FAIL:-0} == 1 &&
+      " $* " == *" --extract "* ]]; then
+  exit 85
+fi
 exec /usr/bin/tar "$@"
 FAKE
 
@@ -103,6 +112,21 @@ cat >"$fake_bin/chown" <<'FAKE'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'chown <%s>\n' "$*" >>"$FAKE_COMMAND_LOG"
+if [[ ${FAKE_CHOWN_CANDIDATE_FAIL:-0} == 1 &&
+      ${!#} == */profile-new ]]; then
+  exit 86
+fi
+FAKE
+
+cat >"$fake_bin/chmod" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ ${!#} == */profile-new ]]; then
+  [[ -z ${FAKE_COMMAND_LOG:-} ]] ||
+    printf 'chmod <%s>\n' "$*" >>"$FAKE_COMMAND_LOG"
+  [[ ${FAKE_CHMOD_CANDIDATE_FAIL:-0} != 1 ]] || exit 87
+fi
+exec /usr/bin/chmod "$@"
 FAKE
 
 cat >"$fake_bin/openssl" <<'FAKE'
@@ -116,6 +140,13 @@ cat >"$fake_bin/python3" <<'FAKE'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ ${FAKE_RENAME_EXCHANGE_FAIL:-0} != 1 ]] || exit 84
+exchange_count=0
+[[ ! -f ${FAKE_EXCHANGE_COUNT:-} ]] ||
+  exchange_count=$(<"$FAKE_EXCHANGE_COUNT")
+exchange_count=$((exchange_count + 1))
+[[ -z ${FAKE_EXCHANGE_COUNT:-} ]] ||
+  printf '%s\n' "$exchange_count" >"$FAKE_EXCHANGE_COUNT"
+[[ ${FAKE_RENAME_EXCHANGE_FAIL_ON:-0} -ne $exchange_count ]] || exit 84
 exec /usr/bin/python3 "$@"
 FAKE
 
@@ -179,6 +210,13 @@ if [[ ${FAKE_MV_FAIL_FAILED_TO_PROFILE:-0} == 1 &&
       $destination == "$REMOTE_CHROME_DATA_DIR/profile" ]]; then
   exit 83
 fi
+if [[ ${FAKE_MV_FAIL_NEW_TO_CANDIDATE:-0} == 1 &&
+      $source_path == */profile-new &&
+      ( $destination == "$REMOTE_CHROME_DATA_DIR/profile" ||
+        $destination == "$REMOTE_CHROME_DATA_DIR/profile.rollback-"* ||
+        $destination == "$REMOTE_CHROME_DATA_DIR/profile.candidate-"* ) ]]; then
+  exit 88
+fi
 exec /usr/bin/mv "$@"
 FAKE
 cat >"$fake_bin/rm" <<'FAKE'
@@ -189,7 +227,7 @@ if [[ ${FAKE_RM_FAIL_RESTORE:-0} == 1 && " $* " == *"/restore-staging/"* ]]; the
 fi
 exec /usr/bin/rm "$@"
 FAKE
-chmod +x "$fake_bin"/*
+/usr/bin/chmod +x "$fake_bin"/*
 export PATH="$fake_bin:$PATH"
 
 REMOTE_CHROME_SKIP_MAIN=1
@@ -199,6 +237,19 @@ source vminstall/installer-main.sh
 source vminstall/lib/backup.sh
 # shellcheck source=../vminstall/lib/management.sh
 source vminstall/lib/management.sh
+
+eval "$(
+  declare -f vm_backup_event |
+    sed '1s/^vm_backup_event /vm_backup_event_real /'
+)"
+vm_backup_event() {
+  if [[ ${FAKE_BACKUP_EVENT_FAIL_ONCE:-} == "${1:-}" &&
+        ! -e ${FAKE_BACKUP_EVENT_FAILED:-} ]]; then
+    : >"$FAKE_BACKUP_EVENT_FAILED"
+    return 89
+  fi
+  vm_backup_event_real "$@"
+}
 
 for required_function in \
   vm_backup_profile vm_restore_profile vm_validate_backup_archive \
@@ -313,14 +364,20 @@ FAKE
   export FAKE_GCS_ROOT="$fixture_root/gcs"
   export FAKE_HEALTH_COUNT="$fixture_root/health.count"
   export FAKE_START_COUNT="$fixture_root/start.count"
+  export FAKE_EXCHANGE_COUNT="$fixture_root/exchange.count"
   export FAKE_UPLOAD_COUNT="$fixture_root/upload.count"
   export FAKE_PS_COUNT="$fixture_root/ps.count"
   export FAKE_SYSTEMD_STATE="$fixture_root/run/systemd-state"
+  export FAKE_BACKUP_EVENT_FAILED="$fixture_root/event.failed"
   unset FAKE_GCLOUD_FAIL_UPLOAD FAKE_HEALTH_FAIL_ON KEEP_LOCAL_BACKUPS
   unset FAKE_PS_FAIL_ON FAKE_PS_HANG_ON FAKE_RM_FAIL_RESTORE
+  unset FAKE_TAR_EXTRACT_FAIL FAKE_CHMOD_CANDIDATE_FAIL
+  unset FAKE_CHOWN_CANDIDATE_FAIL FAKE_MV_FAIL_NEW_TO_CANDIDATE
+  unset FAKE_BACKUP_EVENT_FAIL_ONCE
   unset FAKE_START_FAIL_ON FAKE_MV_FAIL_CANDIDATE_TO_FAILED
   unset FAKE_MV_FAIL_ROLLBACK_TO_PROFILE FAKE_MV_FAIL_FAILED_TO_PROFILE
-  unset FAKE_RENAME_EXCHANGE_FAIL FAKE_SYSTEMCTL_DISABLE_FAIL
+  unset FAKE_RENAME_EXCHANGE_FAIL FAKE_RENAME_EXCHANGE_FAIL_ON
+  unset FAKE_SYSTEMCTL_DISABLE_FAIL
   unset FAKE_SYSTEMCTL_DISABLE_ABSENT
   : >"$REMOTE_CHROME_BACKUP_LOG"
   : >"$FAKE_COMMAND_LOG"
@@ -553,6 +610,88 @@ restore_unconfirmed_rollback_stop_preserves_all() {
   done
 }
 
+assert_pre_exchange_failure_keeps_original() {
+  local failure_name=$1
+  [[ $status -ne 0 &&
+     -d $REMOTE_CHROME_DATA_DIR/profile &&
+     ! -L $REMOTE_CHROME_DATA_DIR/profile &&
+     -f $REMOTE_CHROME_DATA_DIR/profile/current-marker &&
+     ! -e $REMOTE_CHROME_DATA_DIR/profile/restored-marker &&
+     ! -e $FAKE_BROWSER_STOPPED ]] ||
+    fail "$failure_name must retain the running original canonical profile"
+  ! find "$REMOTE_CHROME_DATA_DIR" -maxdepth 1 -type d \
+    \( -name 'profile.rollback-*' -o -name 'profile.failed-*' \
+       -o -name 'profile.candidate-*' \) -print | grep -q . ||
+    fail "$failure_name must not leave unsafe sibling profile state"
+  ! find "$REMOTE_CHROME_DATA_DIR/restore-staging" -mindepth 1 \
+    -maxdepth 1 -print | grep -q . ||
+    fail "$failure_name must clean only its uncommitted staging"
+}
+
+restore_extract_failure_keeps_original_canonical() {
+  setup_fixture "$FUNCNAME"; make_restore_fixture valid
+  export FAKE_TAR_EXTRACT_FAIL=1
+  set +e
+  vm_restore_profile "$RESTORE_MANIFEST_URI" \
+    >"$fixture_root/restore.stdout" 2>"$fixture_root/restore.stderr"
+  status=$?
+  set -e
+  assert_pre_exchange_failure_keeps_original 'extract failure'
+  ! grep -Fxq stop "$REMOTE_CHROME_BACKUP_LOG" ||
+    fail 'candidate extraction must finish before stopping the browser'
+}
+
+restore_candidate_chmod_failure_keeps_original_canonical() {
+  setup_fixture "$FUNCNAME"; make_restore_fixture valid
+  export FAKE_CHMOD_CANDIDATE_FAIL=1
+  set +e
+  vm_restore_profile "$RESTORE_MANIFEST_URI" \
+    >"$fixture_root/restore.stdout" 2>"$fixture_root/restore.stderr"
+  status=$?
+  set -e
+  assert_pre_exchange_failure_keeps_original 'candidate chmod failure'
+  ! grep -Fxq stop "$REMOTE_CHROME_BACKUP_LOG" ||
+    fail 'candidate chmod must finish before stopping the browser'
+}
+
+restore_candidate_chown_failure_keeps_original_canonical() {
+  setup_fixture "$FUNCNAME"; make_restore_fixture valid
+  export FAKE_CHOWN_CANDIDATE_FAIL=1
+  set +e
+  vm_restore_profile "$RESTORE_MANIFEST_URI" \
+    >"$fixture_root/restore.stdout" 2>"$fixture_root/restore.stderr"
+  status=$?
+  set -e
+  assert_pre_exchange_failure_keeps_original 'candidate chown failure'
+  ! grep -Fxq stop "$REMOTE_CHROME_BACKUP_LOG" ||
+    fail 'candidate chown must finish before stopping the browser'
+}
+
+restore_candidate_placement_failure_keeps_original_canonical() {
+  setup_fixture "$FUNCNAME"; make_restore_fixture valid
+  export FAKE_MV_FAIL_NEW_TO_CANDIDATE=1
+  set +e
+  vm_restore_profile "$RESTORE_MANIFEST_URI" \
+    >"$fixture_root/restore.stdout" 2>"$fixture_root/restore.stderr"
+  status=$?
+  set -e
+  assert_pre_exchange_failure_keeps_original 'candidate placement failure'
+  ! grep -Fxq stop "$REMOTE_CHROME_BACKUP_LOG" ||
+    fail 'candidate placement must finish before stopping the browser'
+}
+
+restore_pre_exchange_event_failure_restarts_original() {
+  setup_fixture "$FUNCNAME"; make_restore_fixture valid
+  export FAKE_BACKUP_EVENT_FAIL_ONCE=preserve
+  set +e
+  vm_restore_profile "$RESTORE_MANIFEST_URI" \
+    >"$fixture_root/restore.stdout" 2>"$fixture_root/restore.stderr"
+  status=$?
+  set -e
+  assert_pre_exchange_failure_keeps_original 'pre-exchange event failure'
+  assert_order "$REMOTE_CHROME_BACKUP_LOG" stop start health
+}
+
 assert_confirmed_stop_recovery_failure() {
   local expected_marker=$1
   local recovery rollback staging failed retained
@@ -602,7 +741,7 @@ restore_candidate_profile_rename_failure_preserves_canonical() {
 restore_rollback_profile_rename_failure_restores_candidate() {
   setup_fixture "$FUNCNAME"; make_restore_fixture valid
   export FAKE_HEALTH_FAIL_ON=2
-  export FAKE_RENAME_EXCHANGE_FAIL=1
+  export FAKE_RENAME_EXCHANGE_FAIL_ON=2
   set +e
   vm_restore_profile "$RESTORE_MANIFEST_URI" \
     >"$fixture_root/restore.stdout" 2>"$fixture_root/restore.stderr"
@@ -614,7 +753,7 @@ restore_rollback_profile_rename_failure_restores_candidate() {
 restore_combined_rename_failure_keeps_canonical_profile() {
   setup_fixture "$FUNCNAME"; make_restore_fixture valid
   export FAKE_HEALTH_FAIL_ON=2
-  export FAKE_RENAME_EXCHANGE_FAIL=1
+  export FAKE_RENAME_EXCHANGE_FAIL_ON=2
   export FAKE_MV_FAIL_ROLLBACK_TO_PROFILE=1
   export FAKE_MV_FAIL_FAILED_TO_PROFILE=1
   set +e
@@ -730,7 +869,7 @@ restore_success_removes_staging_only() {
   [[ $(stat -c '%a' "$REMOTE_CHROME_DATA_DIR/profile") == 700 ]] ||
     fail 'restore must preserve the root-only profile mode'
   assert_order "$REMOTE_CHROME_BACKUP_LOG" \
-    lock download validate stop preserve extract chown start health
+    lock download validate extract chown stop preserve start health
 }
 
 backup_timer_lifecycle_follows_schedule() {
