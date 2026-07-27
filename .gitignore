@@ -8,3 +8,4 @@ chrome-mcp-profile-*.tar.gz
 caddy-data/
 caddy-config/
 chrome-profile/
+dist/
