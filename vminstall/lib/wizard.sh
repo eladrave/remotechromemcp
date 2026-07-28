@@ -13,11 +13,11 @@ vm_prompt() {
     fi
   fi
   [[ -r $tty_path ]] ||
-    vm_die 2 "Interactive input unavailable; use --non-interactive with --domain, --email, and --data-dir"
+    vm_die 2 "Interactive input unavailable; use --non-interactive with --email and --data-dir; --domain is optional"
   printf '%s\n' "$prompt" >>"$tty_output" ||
-    vm_die 2 "Interactive input unavailable; use --non-interactive with --domain, --email, and --data-dir"
+    vm_die 2 "Interactive input unavailable; use --non-interactive with --email and --data-dir; --domain is optional"
   IFS= read -r value <"$tty_path" ||
-    vm_die 2 "Interactive input unavailable; use --non-interactive with --domain, --email, and --data-dir"
+    vm_die 2 "Interactive input unavailable; use --non-interactive with --email and --data-dir; --domain is optional"
   printf '%s' "$value"
 }
 
@@ -32,11 +32,11 @@ vm_open_tty() {
     fi
   fi
   [[ -r $tty_path ]] ||
-    vm_die 2 "Interactive input unavailable; use --non-interactive with --domain, --email, and --data-dir"
+    vm_die 2 "Interactive input unavailable; use --non-interactive with --email and --data-dir; --domain is optional"
   exec {VM_TTY_INPUT_FD}<"$tty_path" ||
     vm_die 2 'Interactive input is unavailable'
   exec {VM_TTY_OUTPUT_FD}>>"$tty_output" ||
-    vm_die 2 "Interactive input unavailable; use --non-interactive with --domain, --email, and --data-dir"
+    vm_die 2 "Interactive input unavailable; use --non-interactive with --email and --data-dir; --domain is optional"
 }
 
 vm_close_tty() {
@@ -55,7 +55,7 @@ vm_prompt_into() {
   printf '%s\n' "$prompt" >&"$VM_TTY_OUTPUT_FD" ||
     vm_die 2 'Interactive prompt output is unavailable'
   IFS= read -r value <&"$VM_TTY_INPUT_FD" ||
-    vm_die 2 "Interactive input unavailable; use --non-interactive with --domain, --email, and --data-dir"
+    vm_die 2 "Interactive input unavailable; use --non-interactive with --email and --data-dir; --domain is optional"
   printf -v "$destination" '%s' "$value"
 }
 
@@ -81,6 +81,7 @@ vm_installer_usage() {
     '  --domain DOMAIN' \
     '  --email EMAIL' \
     '  --data-dir ABSOLUTE_PATH' \
+    '  --enable-gcs-backup' \
     '  --gcs-bucket BUCKET' \
     '  --backup-schedule SYSTEMD_CALENDAR' \
     '  --disable-gcs-backup --disable-backup-schedule' \
@@ -97,6 +98,8 @@ vm_parse_args() {
   NON_INTERACTIVE=0
   SKIP_DNS_CHECK=0
   ROTATE_CREDENTIALS=0
+  AUTO_DOMAIN=0
+  ENABLE_GCS_BACKUP=0
   DISABLE_GCS_BACKUP=0
   DISABLE_BACKUP_SCHEDULE=0
   INSTALLATION_EXISTS=0
@@ -112,7 +115,16 @@ vm_parse_args() {
         (($# >= 2)) || vm_die 2 "$1 requires a value"
         case "$1" in
           --version) SELECTED_VERSION=$2 ;;
-          --domain) DOMAIN=$2; DOMAIN_SET=1 ;;
+          --domain)
+            DOMAIN=$2
+            DOMAIN_SET=1
+            case "${DOMAIN,,}" in
+              auto|none)
+                DOMAIN=
+                AUTO_DOMAIN=1
+                ;;
+            esac
+            ;;
           --email) ACME_EMAIL=$2; EMAIL_SET=1 ;;
           --data-dir) REMOTE_CHROME_DATA_DIR=$2; DATA_DIR_SET=1 ;;
           --gcs-bucket) GCS_BUCKET=$2; GCS_BUCKET_SET=1 ;;
@@ -124,6 +136,7 @@ vm_parse_args() {
         shift 2
         ;;
       --disable-gcs-backup) DISABLE_GCS_BACKUP=1; shift ;;
+      --enable-gcs-backup) ENABLE_GCS_BACKUP=1; shift ;;
       --disable-backup-schedule) DISABLE_BACKUP_SCHEDULE=1; shift ;;
       --non-interactive) NON_INTERACTIVE=1; shift ;;
       --skip-dns-check) SKIP_DNS_CHECK=1; shift ;;
@@ -133,33 +146,60 @@ vm_parse_args() {
     esac
   done
 
+  ((ENABLE_GCS_BACKUP == 0 || DISABLE_GCS_BACKUP == 0)) ||
+    vm_die 2 '--enable-gcs-backup conflicts with --disable-gcs-backup'
   ((GCS_BUCKET_SET == 0 || DISABLE_GCS_BACKUP == 0)) ||
     vm_die 2 '--gcs-bucket conflicts with --disable-gcs-backup'
   ((BACKUP_SCHEDULE_SET == 0 || DISABLE_BACKUP_SCHEDULE == 0)) ||
     vm_die 2 '--backup-schedule conflicts with --disable-backup-schedule'
   ((BACKUP_SCHEDULE_SET == 0 || DISABLE_GCS_BACKUP == 0)) ||
     vm_die 2 '--backup-schedule conflicts with --disable-gcs-backup'
+  if [[ $GCS_BUCKET_SET -eq 1 || $BACKUP_SCHEDULE_SET -eq 1 ]]; then
+    ENABLE_GCS_BACKUP=1
+  fi
 }
 
 vm_collect_configuration() {
   if [[ $NON_INTERACTIVE -eq 1 ]]; then
     local missing=()
     if [[ ${INSTALLATION_EXISTS:-0} -eq 0 ]]; then
-      [[ $DOMAIN_SET -eq 1 ]] || missing+=(--domain)
       [[ $EMAIL_SET -eq 1 ]] || missing+=(--email)
       [[ $DATA_DIR_SET -eq 1 ]] || missing+=(--data-dir)
     fi
     ((${#missing[@]} == 0)) ||
       vm_die 2 "Non-interactive mode requires ${missing[*]}"
+    if [[ ${INSTALLATION_EXISTS:-0} -eq 0 && $DOMAIN_SET -eq 0 ]]; then
+      AUTO_DOMAIN=1
+    fi
   else
     local answer=
     vm_open_tty
     vm_tty_write_line \
       'The installer validates DNS and checks host ports 80 and 443 before provisioning.'
-    if [[ $DOMAIN_SET -eq 0 ]]; then
-      vm_prompt_into answer 'Domain:'
-      [[ -z $answer ]] || DOMAIN=$answer
-      DOMAIN_SET=1
+    if [[ ${INSTALLATION_EXISTS:-0} -eq 0 && $DOMAIN_SET -eq 0 ]]; then
+      vm_prompt_into answer \
+        'Do you have a domain already pointing to this VM? [y/N]:'
+      case "${answer,,}" in
+        y|yes)
+          vm_prompt_into answer 'Domain:'
+          case "${answer,,}" in
+            ''|auto|none)
+              DOMAIN=
+              AUTO_DOMAIN=1
+              ;;
+            *)
+              DOMAIN=$answer
+              ;;
+          esac
+          ;;
+        ''|n|no|none)
+          DOMAIN=
+          AUTO_DOMAIN=1
+          ;;
+        *)
+          vm_die 2 'Answer yes or no when asked whether you have a domain'
+          ;;
+      esac
     fi
     if [[ $EMAIL_SET -eq 0 ]]; then
       vm_prompt_into answer 'ACME certificate email:'
@@ -173,47 +213,65 @@ vm_collect_configuration() {
       DATA_DIR_SET=1
     fi
 
-    vm_prompt_into answer 'Configure GCS backup? [y/N]:'
-    case "${answer,,}" in
-      y|yes)
-        DISABLE_GCS_BACKUP=0
+    if [[ ${INSTALLATION_EXISTS:-0} -eq 0 &&
+          $ENABLE_GCS_BACKUP -eq 0 &&
+          $DISABLE_GCS_BACKUP -eq 0 ]]; then
+      vm_prompt_into answer 'Enable GCS backup? [y/N]:'
+      case "${answer,,}" in
+        y|yes)
+          ENABLE_GCS_BACKUP=1
+          ;;
+        ''|n|no)
+          DISABLE_GCS_BACKUP=1
+          ;;
+        *)
+          vm_die 2 'Enable GCS backup with yes or no'
+          ;;
+      esac
+    fi
+    if [[ $DISABLE_GCS_BACKUP -eq 0 &&
+          ( $ENABLE_GCS_BACKUP -eq 1 || -n $GCS_BUCKET ) ]]; then
+      ENABLE_GCS_BACKUP=1
+      if [[ -z $GCS_BUCKET ]]; then
         vm_prompt_into answer 'GCS bucket:'
         [[ -z $answer ]] || GCS_BUCKET=$answer
         GCS_BUCKET_SET=1
+      fi
+      if [[ $BACKUP_SCHEDULE_SET -eq 0 &&
+            ${INSTALLATION_EXISTS:-0} -eq 0 ]]; then
         vm_prompt_into answer \
           'Optional backup schedule (systemd OnCalendar, blank for none):'
         if [[ -n $answer ]]; then
           BACKUP_SCHEDULE=$answer
           BACKUP_SCHEDULE_SET=1
         fi
-        ;;
-      n|no)
-        DISABLE_GCS_BACKUP=1
-        DISABLE_BACKUP_SCHEDULE=1
-        GCS_BUCKET=
-        BACKUP_SCHEDULE=
-        ;;
-      '')
-        if [[ -z $GCS_BUCKET ]]; then
-          DISABLE_GCS_BACKUP=1
-          DISABLE_BACKUP_SCHEDULE=1
-        else
-          GCS_BUCKET_SET=1
-        fi
-        ;;
-      *) vm_die 2 'Configure GCS backup with yes or no' ;;
-    esac
-    vm_close_tty
+      fi
+    fi
   fi
 
-  if [[ $DISABLE_GCS_BACKUP -eq 1 ]]; then
+  if [[ $DISABLE_GCS_BACKUP -eq 1 ||
+        ( $ENABLE_GCS_BACKUP -eq 0 && -z $GCS_BUCKET ) ]]; then
+    DISABLE_GCS_BACKUP=1
     GCS_BUCKET=
     BACKUP_SCHEDULE=
   elif [[ $DISABLE_BACKUP_SCHEDULE -eq 1 ]]; then
     BACKUP_SCHEDULE=
   fi
+  if [[ $DISABLE_GCS_BACKUP -eq 0 && -z $GCS_BUCKET ]]; then
+    vm_die 2 '--enable-gcs-backup requires --gcs-bucket in non-interactive mode or a bucket answer in interactive mode'
+  fi
   [[ -z $BACKUP_SCHEDULE || -n $GCS_BUCKET ]] ||
     vm_die 2 'A backup schedule requires a GCS bucket'
+  if [[ ${AUTO_DOMAIN:-0} -eq 1 ]]; then
+    DOMAIN=$(vm_generate_sslip_domain) ||
+      vm_die 69 'Unable to generate an sslip.io domain from the public IPv4 address'
+    if [[ $NON_INTERACTIVE -eq 0 ]]; then
+      vm_tty_write_line "Using automatic domain: $DOMAIN"
+    fi
+  fi
+  if [[ $NON_INTERACTIVE -eq 0 ]]; then
+    vm_close_tty
+  fi
   vm_validate_domain "$DOMAIN" ||
     vm_die 2 "Invalid domain: $DOMAIN"
   vm_validate_email "$ACME_EMAIL" ||

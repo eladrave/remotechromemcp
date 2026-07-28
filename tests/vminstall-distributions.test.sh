@@ -429,6 +429,60 @@ grep -Fq 'curl <-fsS> <--max-time> <5>' "$command_log" ||
   fail 'public IP discovery must use a bounded five-second timeout'
 
 reset_fakes
+FAKE_METADATA_IP=203.0.113.10
+export FAKE_METADATA_IP
+generated_domain=$(vm_generate_sslip_domain)
+[[ $generated_domain == 203-0-113-10.sslip.io ]] ||
+  fail 'automatic domain must embed the discovered public IPv4 in sslip.io'
+grep -Fq 'metadata.google.internal' "$command_log" ||
+  fail 'automatic domain discovery must prefer GCE metadata when available'
+! grep -Fq 'api.ipify.org' "$command_log" ||
+  fail 'valid metadata IPv4 must skip the external fallback'
+
+reset_fakes
+FAKE_METADATA_IP=2001:db8::10
+FAKE_PUBLIC_IP=198.51.100.24
+export FAKE_METADATA_IP FAKE_PUBLIC_IP
+generated_domain=$(vm_generate_sslip_domain)
+[[ $generated_domain == 198-51-100-24.sslip.io ]] ||
+  fail 'automatic domain must fall back when metadata is not an IPv4 address'
+grep -Fq 'metadata.google.internal' "$command_log" &&
+  grep -Fq 'api.ipify.org' "$command_log" ||
+  fail 'automatic IPv4 discovery must use both bounded discovery sources'
+
+for candidate in \
+  203.0.113.10 \
+  0.0.0.0 \
+  255.255.255.255; do
+  vm_validate_ipv4 "$candidate" ||
+    fail "valid IPv4 must be accepted: $candidate"
+done
+for candidate in \
+  203.0.113 \
+  203.0.113.256 \
+  203.0.113.10.example \
+  '203.0.113.10 injected'; do
+  ! vm_validate_ipv4 "$candidate" ||
+    fail "invalid IPv4 must be rejected: $candidate"
+done
+
+reset_fakes
+FAKE_METADATA_IP=not-an-ip
+FAKE_PUBLIC_IP='203.0.113.10 injected'
+export FAKE_METADATA_IP FAKE_PUBLIC_IP
+set +e
+(vm_generate_sslip_domain) >"$test_root/invalid-auto-domain.stdout" \
+  2>"$test_root/invalid-auto-domain.stderr"
+invalid_auto_domain_status=$?
+set -e
+[[ $invalid_auto_domain_status -eq 69 ]] ||
+  fail 'invalid automatic-domain discovery must exit 69'
+grep -Fq 'invalid address' "$test_root/invalid-auto-domain.stderr" ||
+  fail 'invalid automatic-domain discovery must report a bounded error'
+! grep -Fq 'injected' "$test_root/invalid-auto-domain.stderr" ||
+  fail 'invalid public-IP responses must not be reflected into diagnostics'
+
+reset_fakes
 DOMAIN=chrome.example.com
 SKIP_DNS_CHECK=0
 FAKE_DOMAIN_IP=2001:0db8:0000:0000:0000:0000:0000:0010

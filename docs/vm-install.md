@@ -9,7 +9,8 @@ and keeps Chrome state in a persistent host data directory.
 - Ubuntu 22.04, Ubuntu 24.04, or Debian 12
 - x86_64/amd64 CPU
 - Root access through `sudo`
-- A domain whose public DNS `A`/`AAAA` result points to this server
+- Either a domain whose public DNS points to this server or a stable public
+  IPv4 for automatic `sslip.io` naming
 - Inbound TCP 80 and TCP 443 reachable from the Internet
 - Host ports 80 and 443 unused by another web server or proxy
 
@@ -29,11 +30,18 @@ curl -fsSL https://raw.githubusercontent.com/eladrave/remotechromemcp/master/vmi
 Use this moving `master` command only when you intentionally chose the guided
 latest installer. It asks through `/dev/tty` for:
 
-- the public domain;
+- whether you have a public domain and, when you do, its hostname;
 - the certificate email used for ACME notices;
 - the absolute persistent data directory;
-- whether to configure GCS backup;
+- whether to explicitly enable GCS backup, which is disabled by default;
 - the GCS bucket and optional systemd calendar schedule when enabled.
+
+If you answer no, enter `none`, or press Enter at the domain question, the
+installer detects the host's public IPv4 and uses
+`<public-ip-with-dashes>.sslip.io`. This requires no DNS account, but the
+address must be stable and public TCP 80/443 must reach the VM. You can also
+request this explicitly with `--domain none`, or omit `--domain` in
+noninteractive mode.
 
 The installer validates the supported OS and architecture, DNS, port
 availability, Docker Compose, release contents, HTTPS health, and MCP
@@ -51,7 +59,8 @@ The pinned command is not live until the matching `v1.0.0` tag and release
 assets exist and pass CI. Do not present a version as installable merely because
 it appears in this example.
 
-For noninteractive automation, provide every required value explicitly:
+For noninteractive automation, provide every required value and any optional
+domain or backup configuration explicitly:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/eladrave/remotechromemcp/v1.0.0/vminstall/install.sh |
@@ -61,13 +70,14 @@ curl -fsSL https://raw.githubusercontent.com/eladrave/remotechromemcp/v1.0.0/vmi
     --domain chrome.example.com \
     --email admin@example.com \
     --data-dir /var/lib/remote-chrome \
+    --enable-gcs-backup \
     --gcs-bucket example-remote-chrome-backups \
     --backup-schedule 'daily'
 ```
 
-Omit the GCS flags only when backup is intentionally disabled. A noninteractive
-first install without domain, certificate email, or data directory fails
-instead of guessing.
+Omit `--domain` to use an automatically generated `sslip.io` hostname. Omit all
+GCS flags to leave backup disabled. A noninteractive first install without the
+certificate email or data directory fails instead of guessing.
 
 ## Connection handoff
 

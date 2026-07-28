@@ -53,7 +53,8 @@ to the same browser process and profile.
 - Ubuntu 24.04 x86_64
 - Debian 12 x86_64
 - root access through `sudo`
-- a domain you control
+- either a domain you control or a stable public IPv4 for automatic
+  `sslip.io` naming
 - public inbound TCP 80 and 443
 
 A practical starting size is 2 vCPU, 8 GiB RAM, and at least 20 GiB of disk.
@@ -63,8 +64,8 @@ appropriate.
 Before installing:
 
 1. Give the VM a stable public IPv4 address.
-2. Point the domain's public DNS `A` record to that address. Any `AAAA` record
-   must also resolve to this host or be removed.
+2. If using your own domain, point its public DNS `A` record to that address.
+   Any published `AAAA` record must also reach this host or be removed.
 3. Allow inbound TCP 80 and 443 in the cloud firewall and host firewall.
 4. Confirm no existing web server or proxy owns host ports 80 or 443.
 5. Choose an absolute persistent data directory, such as
@@ -84,15 +85,45 @@ curl -fsSL https://raw.githubusercontent.com/eladrave/remotechromemcp/master/vmi
 Although the script arrives on standard input, prompts are read from
 `/dev/tty`. The installer asks for:
 
-- the public domain;
+- whether you already have a public domain;
+- the domain, when supplied, or it automatically creates an
+  `<public-ip-with-dashes>.sslip.io` hostname;
 - an email address for ACME certificate notices;
 - the persistent data directory;
-- whether to enable GCS profile backups;
+- whether to explicitly enable GCS profile backups, which are off by default;
 - the GCS bucket and optional systemd backup schedule, when enabled.
 
 It validates the operating system, architecture, DNS, ports, Docker, Compose
 configuration, public HTTPS, MCP initialization, and the browser login console.
 Docker and Docker Compose are installed when necessary.
+
+### Installing without your own domain
+
+Answer `n`, `no`, `none`, or press Enter when asked whether you have a domain.
+The installer discovers the VM's external IPv4 and generates a hostname such
+as:
+
+```text
+203-0-113-42.sslip.io
+```
+
+`sslip.io` resolves the embedded address without requiring a DNS account. The
+generated hostname still requires a stable public IPv4 and publicly reachable
+TCP 80 and 443 so Caddy can obtain and renew its certificate. Your own domain
+is preferred for a long-lived deployment because the automatic hostname
+depends on a third-party DNS service and changes when the public IP changes.
+
+In noninteractive mode, simply omit `--domain` or explicitly pass
+`--domain none`. GCS backup remains disabled unless `--enable-gcs-backup` or an
+explicit GCS bucket is supplied:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/eladrave/remotechromemcp/master/vminstall/install.sh |
+  sudo sh -s -- \
+    --non-interactive \
+    --email admin@example.com \
+    --data-dir /var/lib/remote-chrome
+```
 
 The `master` URL is a moving, unpinned installer. Use an immutable release tag
 for production automation after that release and its checksum assets actually

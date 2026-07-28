@@ -22,6 +22,8 @@ grep -Fq -- '--version' <<<"$help_output" ||
   fail 'bootstrap help must document --version'
 grep -Fq -- '--domain' <<<"$help_output" ||
   fail 'bootstrap must pass installer arguments through'
+grep -Fq -- '--enable-gcs-backup' <<<"$help_output" ||
+  fail 'bootstrap help must document explicit GCS backup enablement'
 
 missing_version_output="$test_root/missing-version.out"
 if dash vminstall/install.sh --version >"$missing_version_output" 2>&1; then

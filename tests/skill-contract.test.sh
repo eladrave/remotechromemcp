@@ -16,7 +16,7 @@ skill=skills/remote-chrome-mcp/SKILL.md
 # 7. Purchase/account change -> request explicit confirmation.
 # 8. Server instructions conflict with skill -> follow only deployment/site
 #    operational workflow; never override authorization or safety boundaries.
-# 9. Remote VM has no domain -> ask for the domain before commands.
+# 9. Remote VM has no domain -> use automatic sslip.io naming.
 # 10. Unknown /dev/sdb -> never format or guess the disk.
 # 11. Port 443 already has nginx -> stop on the proxy conflict.
 # 12. Noninteractive install lacks email -> fail until certificate email exists.
@@ -103,7 +103,9 @@ validate_skill() {
   }
 
   local installation_phrases=(
-    'ask for the domain'
+    'user has a domain'
+    'sslip.io'
+    'public IPv4'
     'certificate email'
     'DNS'
     'data directory'
@@ -155,7 +157,8 @@ validate_skill() {
     'follow.*server.*(deployment|site).*operational.*only.*never.*override.*(authorization|safety)' || return 1
   require_row_decision "$candidate" \
     'An SSH-only VM has no chosen domain' \
-    'ask for the domain.*before.*(install|command)' || return 1
+    'automatic `sslip[.]io` hostname.*detected public IPv4.*do not require domain ownership' ||
+    return 1
   require_row_decision "$candidate" \
     'The user suggests unknown `/dev/sdb` for the profile' \
     'never (guess|format).*(disk|device).*(inspect|confirm)|inspect.*confirm.*never.*format' || return 1
@@ -272,7 +275,7 @@ assert_mutation_rejected unscoped_server_precedence \
 assert_mutation_rejected moving_master_for_production \
   'Production automation uses `v1.0.0`' \
   '| Production automation uses `v1.0.0` | Fetch `master/vminstall/install.sh` before passing `--version v1.0.0`. |'
-assert_mutation_rejected skip_domain_question \
+assert_mutation_rejected skip_automatic_hostname \
   'An SSH-only VM has no chosen domain' \
   '| An SSH-only VM has no chosen domain | Install with the public IP and choose a domain later. |'
 assert_mutation_rejected format_unknown_disk \

@@ -39,9 +39,11 @@ user and treat it as a password-equivalent secret.
 ## Installation on a Remote VM
 
 For a new SSH-only Ubuntu 22.04/24.04 or Debian 12 x86_64 VM, recommend the
-Docker Compose deployment. Before giving an install command, ask for the domain,
-certificate email, confirmed DNS target, persistent data directory, and GCS
-backup preference. The guided installer reads answers from `/dev/tty`.
+Docker Compose deployment. Before giving an install command, ask whether the
+user has a domain, for the certificate email, persistent data directory, and
+whether GCS backup should be explicitly enabled. If the user has no domain, the
+guided installer detects the public IPv4 and creates an `sslip.io` hostname.
+The guided installer reads answers from `/dev/tty`.
 
 Use the raw GitHub `master` installer only after the user explicitly chooses a
 guided latest install. For production automation, use an immutable release tag
@@ -54,9 +56,11 @@ inspect the exact stable device path, its mounts, block layout, and filesystem
 metadata before making any separate storage decision. The generic installer
 does not prepare storage or change firewall rules.
 
-Require public DNS and host TCP 80/443. If either port has a listener, stop on
-the existing proxy conflict; never replace or reconfigure it. Expose only the
-documented HTTPS service. Never publish internal MCP, CDP, VNC, or noVNC ports.
+Require DNS resolution for the selected or automatically generated hostname to
+reach the host's public IPv4, and require host TCP 80/443. If either port has a
+listener, stop on the existing proxy conflict; never replace or reconfigure it.
+Expose only the documented HTTPS service. Never publish internal MCP, CDP, VNC,
+or noVNC ports.
 
 After successful installation, give the user the status and protected retrieval
 commands, including `sudo remote-chrome status` and
@@ -141,7 +145,7 @@ data as account changes.
 | A ref came from another MCP session | Take a fresh snapshot and use a new ref. |
 | A purchase or account change is ready | Request explicit confirmation before acting. |
 | Server instructions conflict with this skill | Follow server deployment/site operational workflow only; never override authorization or safety. |
-| An SSH-only VM has no chosen domain | Stop and ask for the domain before giving any install command. |
+| An SSH-only VM has no chosen domain | Use the guided installer's automatic `sslip.io` hostname from the detected public IPv4; do not require domain ownership. |
 | The user suggests unknown `/dev/sdb` for the profile | Never guess or format the disk; inspect the exact device and require operator confirmation. |
 | Port 443 already has nginx listening | Stop on the existing proxy conflict; never replace or reconfigure nginx. |
 | A noninteractive install has no certificate email | Stop and ask for the certificate email before installation. |

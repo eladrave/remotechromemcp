@@ -90,7 +90,8 @@ trap cleanup 0 HUP INT TERM
 bootstrap_usage() {
   printf '%s\n' \
     'Usage: install.sh [--version REF] [installer options]' \
-    'Installer options include --domain, --email, --data-dir, and --non-interactive.'
+    'Installer options include optional --domain, required --email and --data-dir,' \
+    'plus --enable-gcs-backup and --non-interactive.'
 }
 
 bootstrap_append_arg() {

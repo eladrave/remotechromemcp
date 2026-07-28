@@ -68,6 +68,61 @@ vm_normalize_address() {
   printf '%s' "${canonical,,}"
 }
 
+vm_validate_ipv4() {
+  local candidate=${1:-} octet
+  local -a octets
+  [[ $candidate != *$'\n'* && $candidate != *$'\r'* &&
+     $candidate != *[!0-9.]* ]] || return 1
+  IFS=. read -r -a octets <<<"$candidate"
+  ((${#octets[@]} == 4)) || return 1
+  for octet in "${octets[@]}"; do
+    [[ $octet =~ ^[0-9]{1,3}$ ]] || return 1
+    ((10#$octet <= 255)) || return 1
+  done
+}
+
+vm_discover_public_address() {
+  local external_ip
+  external_ip=$(
+    curl -fsS --max-time 5 \
+      -H 'Metadata-Flavor: Google' \
+      'http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip'
+  ) || external_ip=$(
+    curl -fsS --max-time 5 'https://api.ipify.org'
+  ) || vm_die 69 'Unable to discover this host public IP'
+  [[ -n $external_ip &&
+     $external_ip != *$'\n'* &&
+     $external_ip != *$'\r'* ]] ||
+    vm_die 69 'Public IP discovery returned an invalid response'
+  printf '%s' "$external_ip"
+}
+
+vm_discover_public_ipv4() {
+  local external_ip
+  external_ip=$(
+    curl -fsS --max-time 5 \
+      -H 'Metadata-Flavor: Google' \
+      'http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip'
+  ) || external_ip=
+  if ! vm_validate_ipv4 "$external_ip"; then
+    external_ip=$(
+      curl -fsS --max-time 5 'https://api.ipify.org'
+    ) || vm_die 69 'Unable to discover this host public IPv4 address'
+  fi
+  vm_validate_ipv4 "$external_ip" ||
+    vm_die 69 'Public IPv4 discovery returned an invalid address'
+  printf '%s' "$external_ip"
+}
+
+vm_generate_sslip_domain() {
+  local external_ipv4 status
+  external_ipv4=$(vm_discover_public_ipv4) || {
+    status=$?
+    return "$status"
+  }
+  printf '%s.sslip.io' "${external_ipv4//./-}"
+}
+
 vm_verify_dns() {
   [[ ${SKIP_DNS_CHECK:-0} == 1 ]] && return 0
 
@@ -76,13 +131,7 @@ vm_verify_dns() {
   resolved_output=$(timeout 5 getent ahosts "$DOMAIN") ||
     vm_die 69 "Unable to resolve DNS for $DOMAIN"
 
-  external_ip=$(
-    curl -fsS --max-time 5 \
-      -H 'Metadata-Flavor: Google' \
-      'http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip'
-  ) || external_ip=$(
-    curl -fsS --max-time 5 'https://api.ipify.org'
-  ) || vm_die 69 'Unable to discover this host public IP'
+  external_ip=$(vm_discover_public_address) || return 1
 
   normalized_external=$(vm_normalize_address "$external_ip") ||
     vm_die 69 "Public IP discovery returned an invalid numeric address: $external_ip"

@@ -214,6 +214,8 @@ vm_parse_args \
   fail 'backup schedule parser value was not preserved'
 [[ ${GCS_BUCKET_SET:-0} -eq 1 && ${BACKUP_SCHEDULE_SET:-0} -eq 1 ]] ||
   fail 'explicit GCS values must be distinguished from omitted rerun values'
+[[ ${ENABLE_GCS_BACKUP:-0} -eq 1 ]] ||
+  fail 'an explicit GCS bucket or schedule must enable backup'
 [[ "$NON_INTERACTIVE" -eq 1 &&
    "$SKIP_DNS_CHECK" -eq 1 &&
    "$ROTATE_CREDENTIALS" -eq 1 ]] ||
@@ -226,11 +228,23 @@ vm_parse_args \
   --disable-gcs-backup \
   --disable-backup-schedule \
   --non-interactive
-[[ ${DISABLE_GCS_BACKUP:-0} -eq 1 &&
+[[ ${ENABLE_GCS_BACKUP:-0} -eq 0 &&
+   ${DISABLE_GCS_BACKUP:-0} -eq 1 &&
    ${DISABLE_BACKUP_SCHEDULE:-0} -eq 1 ]] ||
   fail 'safe GCS and schedule disable flags must be parsed explicitly'
 
+vm_parse_args \
+  --domain chrome.example.com \
+  --email admin@example.com \
+  --data-dir "$test_root/data" \
+  --enable-gcs-backup \
+  --non-interactive
+[[ ${ENABLE_GCS_BACKUP:-0} -eq 1 &&
+   ${DISABLE_GCS_BACKUP:-0} -eq 0 ]] ||
+  fail 'GCS backup must require an explicit enable state'
+
 for conflicting_flags in \
+  '--enable-gcs-backup --disable-gcs-backup' \
   '--gcs-bucket fixture-backups --disable-gcs-backup' \
   '--backup-schedule daily --disable-backup-schedule'; do
   read -r -a conflict_args <<<"$conflicting_flags"
@@ -258,6 +272,7 @@ prompted_value="$(REMOTE_CHROME_TTY="$tty_fixture" vm_prompt 'Domain: ')"
 wizard_input="$test_root/wizard-input"
 wizard_prompts="$test_root/wizard-prompts"
 printf '%s\n' \
+  yes \
   guided.example.com \
   admin@guided.example.com \
   "$test_root/guided-data" \
@@ -281,10 +296,11 @@ vm_collect_configuration
   fail 'interactive wizard must collect the optional backup schedule last'
 cat >"$test_root/expected-wizard-prompts" <<'EOF'
 The installer validates DNS and checks host ports 80 and 443 before provisioning.
+Do you have a domain already pointing to this VM? [y/N]:
 Domain:
 ACME certificate email:
 Data directory [/var/lib/remote-chrome]:
-Configure GCS backup? [y/N]:
+Enable GCS backup? [y/N]:
 GCS bucket:
 Optional backup schedule (systemd OnCalendar, blank for none):
 EOF
@@ -294,6 +310,7 @@ cmp -s "$test_root/expected-wizard-prompts" "$wizard_prompts" ||
 stdin_canary="$test_root/stdin-canary"
 printf 'stdin.example.com\n' >"$stdin_canary"
 printf '%s\n' \
+  yes \
   tty.example.com \
   tty@example.com \
   "$test_root/tty-data" \
@@ -307,6 +324,87 @@ vm_collect_configuration <"$stdin_canary"
   fail 'interactive wizard must use only its TTY and skip GCS details after no'
 [[ $(<"$stdin_canary") == stdin.example.com ]] ||
   fail 'interactive wizard must not consume piped standard input'
+
+auto_wizard_input="$test_root/auto-wizard-input"
+auto_wizard_prompts="$test_root/auto-wizard-prompts"
+printf '%s\n' \
+  no \
+  auto@example.com \
+  "$test_root/auto-data" \
+  no >"$auto_wizard_input"
+: >"$auto_wizard_prompts"
+(
+  vm_generate_sslip_domain() {
+    printf '203-0-113-10.sslip.io'
+  }
+  vm_parse_args
+  REMOTE_CHROME_TTY="$auto_wizard_input"
+  REMOTE_CHROME_TTY_OUTPUT="$auto_wizard_prompts"
+  vm_collect_configuration
+  [[ $DOMAIN == 203-0-113-10.sslip.io &&
+     $AUTO_DOMAIN -eq 1 &&
+     $DISABLE_GCS_BACKUP -eq 1 &&
+     -z $GCS_BUCKET ]] ||
+    fail 'interactive no-domain setup must generate sslip.io and disable backup by default'
+)
+grep -Fxq \
+  'Do you have a domain already pointing to this VM? [y/N]:' \
+  "$auto_wizard_prompts" ||
+  fail 'interactive auto-domain mode must ask a yes-or-no domain question'
+grep -Fxq 'Using automatic domain: 203-0-113-10.sslip.io' \
+  "$auto_wizard_prompts" ||
+  fail 'interactive auto-domain mode must report the generated hostname'
+
+(
+  vm_generate_sslip_domain() {
+    printf '198-51-100-24.sslip.io'
+  }
+  vm_parse_args \
+    --email automated@example.com \
+    --data-dir "$test_root/automated-data" \
+    --non-interactive
+  vm_collect_configuration
+  [[ $DOMAIN == 198-51-100-24.sslip.io &&
+     $AUTO_DOMAIN -eq 1 &&
+     $DISABLE_GCS_BACKUP -eq 1 &&
+     -z $GCS_BUCKET && -z $BACKUP_SCHEDULE ]] ||
+    fail 'noninteractive setup must auto-generate a domain and leave backup disabled'
+)
+
+(
+  vm_generate_sslip_domain() {
+    printf '192-0-2-44.sslip.io'
+  }
+  vm_parse_args \
+    --domain none \
+    --email none@example.com \
+    --data-dir "$test_root/none-data" \
+    --non-interactive
+  vm_collect_configuration
+  [[ $DOMAIN == 192-0-2-44.sslip.io && $AUTO_DOMAIN -eq 1 ]] ||
+    fail '--domain none must explicitly request automatic sslip.io mode'
+)
+
+set +e
+(
+  vm_parse_args \
+    --email backup@example.com \
+    --data-dir "$test_root/backup-data" \
+    --enable-gcs-backup \
+    --non-interactive
+  vm_generate_sslip_domain() {
+    printf '203-0-113-11.sslip.io'
+  }
+  vm_collect_configuration
+) >"$test_root/backup-missing-bucket.stdout" \
+  2>"$test_root/backup-missing-bucket.stderr"
+backup_missing_bucket_status=$?
+set -e
+[[ $backup_missing_bucket_status -eq 2 ]] ||
+  fail 'explicit backup enable without a bucket must exit 2'
+grep -Fq -- '--enable-gcs-backup requires --gcs-bucket' \
+  "$test_root/backup-missing-bucket.stderr" ||
+  fail 'missing opt-in backup bucket must have an actionable error'
 
 missing_tty="$test_root/missing-tty"
 set +e
@@ -355,10 +453,12 @@ no_tty_status=$?
 set -e
 [[ "$no_tty_status" -eq 2 ]] ||
   fail "incomplete noninteractive invocation must exit 2, got $no_tty_status"
-for required_flag in --domain --email --data-dir; do
+for required_flag in --email --data-dir; do
   grep -Fq -- "$required_flag" "$test_root/no-tty.stderr" ||
     fail "noninteractive failure must name missing $required_flag"
 done
+! grep -Fq -- 'requires --domain' "$test_root/no-tty.stderr" ||
+  fail 'noninteractive mode must not require a domain'
 [[ ! -e "$missing_tty" ]] ||
   fail 'noninteractive mode must not create or read a fallback input path'
 

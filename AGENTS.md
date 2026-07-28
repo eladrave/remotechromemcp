@@ -42,10 +42,12 @@ The preferred installation experience is:
 curl -fsSL https://raw.githubusercontent.com/eladrave/remotechromemcp/master/vminstall/install.sh | sudo sh
 ```
 
-The guided installer must ask for everything required, including the public
-domain and ACME certificate email, validate the environment, install Docker
-when necessary, bind the public service to host TCP 80/443, obtain and renew a
-TLS certificate through Caddy, and print a protected connection handoff.
+The guided installer must ask whether the operator has a public domain and for
+the ACME certificate email. When no domain is supplied, it must detect the
+external IPv4 and use the corresponding `<dashed-ip>.sslip.io` hostname. It
+must validate the environment, install Docker when necessary, bind the public
+service to host TCP 80/443, obtain and renew a TLS certificate through Caddy,
+and print a protected connection handoff.
 
 The user must then be able to:
 
@@ -209,13 +211,14 @@ The VM installer supports:
 - interactive input through `/dev/tty` even when the script itself arrives on
   stdin through `curl | sudo sh`;
 - explicit noninteractive flags;
-- DNS and port preflight;
+- hostname/DNS and port preflight, including automatic `sslip.io` naming when
+  the operator has no domain;
 - Docker/Compose installation;
 - secure release staging;
 - activation with recovery to the previous release;
 - a root-only connection handoff;
 - persistent profile, Caddy certificate, and Caddy configuration directories;
-- optional scheduled GCS backup;
+- explicitly enabled scheduled GCS backup, disabled by default;
 - backup/restore maintenance locking and browser quiescing.
 
 ### Native path: legacy/rollback
