@@ -17,6 +17,10 @@ The recommended deployment is the guided Docker/VM installer. The older native
 systemd scripts remain in the repository as a legacy rollback path and are not
 the primary installation method.
 
+For a complete human-and-agent installation walkthrough, including guided,
+noninteractive, and direct Docker Compose paths, see
+[`installation.md`](installation.md).
+
 ## How it works
 
 ```text
@@ -444,6 +448,7 @@ private ports are not published.
 
 ## Additional documentation
 
+- [Complete human and AI-agent installation guide](installation.md)
 - [Generic VM installation and operations](docs/vm-install.md)
 - [Google Compute Engine manual setup](docs/gce-manual.md)
 - [Remote login and profile persistence](docs/remote-login.md)

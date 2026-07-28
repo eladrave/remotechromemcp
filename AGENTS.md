@@ -186,14 +186,15 @@ Study these files before implementing the session fix:
 | `vminstall/lib/activate.sh` | Activation, public HTTPS verification, rollback, and service readiness. |
 | `vminstall/lib/management.sh` | `remote-chrome` status, credentials, update, restore, and uninstall commands. |
 | `vminstall/lib/backup.sh` | Quiesced Chrome-profile backup and atomic restore logic. |
+| `installation.md` | Complete guided, noninteractive agent, and direct Docker Compose installation guide. |
 | `docs/vm-install.md` | Generic VM installation and operations guide. |
 | `docs/gce-manual.md` | Manual GCE VM, Persistent Disk, firewall, and GCS backup guide. |
 | `tests/compose-smoke.test.sh` | Full container runtime, routing, noVNC, and profile persistence smoke test. |
 | `tests/run.sh` | Main non-runtime contract and shell test entry point. |
 
-The root `README.md` still leads with the older native/systemd architecture and
-is now misleading about the preferred container deployment. Updating it is a
-secondary outstanding documentation task.
+The root `README.md` and `installation.md` lead with the Docker/VM deployment.
+Keep the older native/systemd architecture clearly labeled as a legacy rollback
+path.
 
 ## Supported deployment paths
 
@@ -888,7 +889,6 @@ The work is finished only when all of these are true:
 
 ## Known caveats and follow-up work
 
-- `README.md` is outdated relative to the Docker/VM implementation.
 - There is no verified tagged production release yet.
 - Cloud Run is not implemented.
 - The current health check mutates MCP sessions.
