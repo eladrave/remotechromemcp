@@ -139,7 +139,8 @@ validate_skill() {
     'homepage.*visible.*(login|Account & Lists)' || return 1
   require_row_decision "$candidate" \
     'MFA, CAPTCHA, or a security key appears' \
-    'stop.*human control.*/login/' || return 1
+    'stop.*remote_chrome_request_human_intervention.*no arguments.*protected `/login/` URL' ||
+    return 1
   require_row_decision "$candidate" \
     'The user has no shell' \
     'never.*login[.]sh.*remotely' || return 1

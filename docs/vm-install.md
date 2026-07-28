@@ -98,6 +98,14 @@ authorizes the noVNC WebSocket. Basic Auth remains available as a fallback.
 Treat the one-click URL like a password: it is reusable until credentials are
 rotated and may remain in browser history or link-sharing systems.
 
+The MCP server also publishes the read-only
+`remote_chrome_request_human_intervention` tool. When a site requires a
+password, MFA, CAPTCHA, security key, consent, or another human-only step, the
+agent calls this tool with no arguments and gives its returned protected noVNC
+URL to the requesting user. The tool never accepts usernames, passwords, codes,
+or other verification data. After the user returns control, the agent takes a
+fresh browser snapshot and continues in the same persistent profile.
+
 ## Operations
 
 Inspect the installed release, service, health, backup schedule, and most recent

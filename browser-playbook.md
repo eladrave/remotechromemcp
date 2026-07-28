@@ -40,8 +40,10 @@ remote browser is deployed.
 
 ## Hand off authentication
 
-- When login is required, ask the user to open the server's `/login/` page,
-  illustrated by `https://chrome.example.com/login/`, and take human control.
+- When login or another human-only step is required, call
+  `remote_chrome_request_human_intervention` and give the returned protected
+  noVNC URL to the user. The tool accepts no arguments: never pass credentials
+  or verification data to it.
 - Never ask the user to send credentials, cookies, tokens, recovery codes, or
   security-key output through chat. Resume only after the user confirms that
   the visible browser session is ready.

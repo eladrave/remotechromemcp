@@ -100,6 +100,9 @@ if (browser.init !== true || browser.restart !== 'unless-stopped' || !browser.sh
   throw new Error('browser lifecycle settings are incomplete');
 if (browser.environment?.REMOTE_CHROME_MCP_SESSION_IDLE_TIMEOUT_MS !== '1800000')
   throw new Error('browser must receive the bounded MCP session idle timeout');
+if (browser.environment?.REMOTE_CHROME_LOGIN_TOKEN_URL !==
+    'https://chrome.example.test/login/?token=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210')
+  throw new Error('browser must receive the exact protected human-handoff URL');
 if (proxy.init !== true || proxy.restart !== 'unless-stopped')
   throw new Error('proxy lifecycle settings are incomplete');
 
@@ -144,6 +147,7 @@ assert.match(browser, /^\s{4}restart: unless-stopped$/m);
 assert.match(browser, /^\s{4}stop_grace_period: 45s$/m);
 assert.match(browser, /^\s{4}shm_size:/m);
 assert.match(browser, /REMOTE_CHROME_MCP_SESSION_IDLE_TIMEOUT_MS/);
+assert.match(browser, /REMOTE_CHROME_LOGIN_TOKEN_URL: https:\/\/\$\{DOMAIN:\?set DOMAIN\}\/login\/\?token=\$\{LOGIN_TOKEN:\?set LOGIN_TOKEN\}/);
 assert.match(browser, /chrome-profile:\/data\/chrome-profile/);
 assert.match(proxy, /\$\{PROXY_BIND_ADDRESS:-0\.0\.0\.0\}:\$\{PROXY_HTTP_PORT:-80\}:80/);
 assert.match(proxy, /\$\{PROXY_BIND_ADDRESS:-0\.0\.0\.0\}:\$\{PROXY_HTTPS_PORT:-443\}:443/);

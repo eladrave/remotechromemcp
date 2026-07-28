@@ -13,6 +13,8 @@ required_concepts=(
   'Account & Lists'
   'server instructions'
   'Never clear cookies'
+  'remote_chrome_request_human_intervention'
+  'accepts no arguments'
 )
 
 for concept in "${required_concepts[@]}"; do

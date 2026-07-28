@@ -8,6 +8,7 @@ services:
     environment:
       SCREEN_GEOMETRY: ${SCREEN_GEOMETRY:-1440x900x24}
       REMOTE_CHROME_MCP_SESSION_IDLE_TIMEOUT_MS: ${REMOTE_CHROME_MCP_SESSION_IDLE_TIMEOUT_MS:-1800000}
+      REMOTE_CHROME_LOGIN_TOKEN_URL: https://${DOMAIN:?set DOMAIN}/login/?token=${LOGIN_TOKEN:?set LOGIN_TOKEN}
     init: true
     restart: unless-stopped
     stop_grace_period: 45s
