@@ -1,246 +1,428 @@
-# remotechromemcp
+# Remote Chrome MCP
 
-Exposes a [Playwright MCP](https://github.com/microsoft/playwright-mcp) server backed by **your real Chrome profile** (with your saved logins and cookies) over **HTTPS** with bearer token authentication. Intended for remote AI agents (Warp Oz, ChatGPT, Codex, etc.) that need to browse the web as you.
+Remote Chrome MCP runs one persistent, full Google Chrome browser on a Linux
+server and exposes it to MCP clients over HTTPS.
 
-## Architecture
+It is designed for browser tasks that need both automation and occasional human
+help:
 
-```
+- agents control Chrome through Playwright MCP;
+- humans see and control the same browser through an authenticated noVNC page;
+- cookies, local storage, and website logins survive MCP reconnects, container
+  recreation, and host reboots;
+- Caddy obtains and renews the public TLS certificate;
+- only host TCP 80 and 443 are exposed.
+
+The recommended deployment is the guided Docker/VM installer. The older native
+systemd scripts remain in the repository as a legacy rollback path and are not
+the primary installation method.
+
+## How it works
+
+```text
 Remote MCP client
-        │  HTTPS  Authorization: Bearer <token>
-        ▼
-  nginx :443  (TLS — Let's Encrypt)  ──── bearer token check ────► 401 if invalid
-        │                                 HTTP :80 → redirects to HTTPS
-        │  proxy_pass (internal)
-        ▼
-  Playwright MCP  :8931
-        │
-        │  Chrome DevTools Protocol (CDP)
-        ▼
-  Chrome :9222  (headless, your profile copy)
+        |
+        | HTTPS POST/DELETE
+        | Bearer token or /<token>/mcp compatibility URL
+        v
+  Caddy :443
+        |
+        v
+  Playwright MCP :8931
+        |
+        | CDP on container loopback
+        v
+  full headed Google Chrome
+        |
+        +-- persistent Chrome profile
+        |
+        +-- Xvfb -> Openbox -> x11vnc -> noVNC
+                                      ^
+                                      |
+                         Caddy /login/
 ```
 
-All three components run as systemd user services that start automatically at boot.
+Chrome is headed, not Chrome's headless mode. Playwright MCP and noVNC connect
+to the same browser process and profile.
 
-## Prerequisites
+## Recommended VM installation
 
-- Ubuntu / Debian Linux
-- Google Chrome installed (`/usr/bin/google-chrome`)
-- Node.js + npx
-- nginx (`sudo apt install nginx`)
-- certbot + python3-certbot-nginx (`sudo apt install certbot python3-certbot-nginx`)
-- A domain name with an A record pointing to your server's public IP
-- `sudo` access (for nginx config and global npm install)
-- `openssl`, `curl`
+### Supported hosts
 
-## Quick Start
+- Ubuntu 22.04 x86_64
+- Ubuntu 24.04 x86_64
+- Debian 12 x86_64
+- root access through `sudo`
+- a domain you control
+- public inbound TCP 80 and 443
+
+A practical starting size is 2 vCPU, 8 GiB RAM, and at least 20 GiB of disk.
+Chrome profiles can grow, so use a larger or separately mounted data volume when
+appropriate.
+
+Before installing:
+
+1. Give the VM a stable public IPv4 address.
+2. Point the domain's public DNS `A` record to that address. Any `AAAA` record
+   must also resolve to this host or be removed.
+3. Allow inbound TCP 80 and 443 in the cloud firewall and host firewall.
+4. Confirm no existing web server or proxy owns host ports 80 or 443.
+5. Choose an absolute persistent data directory, such as
+   `/var/lib/remote-chrome`.
+
+The installer does not format disks, modify firewall rules, or replace an
+existing proxy. It stops when DNS or port ownership is unsafe.
+
+### Run the guided installer
+
+SSH to the VM and run:
 
 ```bash
-git clone https://github.com/<your-username>/remotechromemcp.git
-cd remotechromemcp
-chmod +x setup.sh login.sh status.sh uninstall.sh
-./setup.sh
+curl -fsSL https://raw.githubusercontent.com/eladrave/remotechromemcp/master/vminstall/install.sh | sudo sh
 ```
 
-The script will print your endpoint URL and bearer token when done.
+Although the script arrives on standard input, prompts are read from
+`/dev/tty`. The installer asks for:
 
-### What `setup.sh` does
+- the public domain;
+- an email address for ACME certificate notices;
+- the persistent data directory;
+- whether to enable GCS profile backups;
+- the GCS bucket and optional systemd backup schedule, when enabled.
 
-1. Copies `~/.config/google-chrome` → `~/.config/chrome-mcp-profile` (one-time, skipped if exists)
-2. Generates a 256-bit bearer token and saves it to `~/.config/mcp-bearer-token.env`
-3. Installs `@playwright/mcp` globally via npm
-4. Writes an nginx site config on port `8932` (HTTP) that validates the bearer token and proxies (with streaming support) to Playwright MCP
-5. Creates two systemd user services: `chrome-mcp` and `playwright-mcp`
-6. Enables both services and runs `loginctl enable-linger` so they survive logout
-7. Starts everything and runs a smoke test
+It validates the operating system, architecture, DNS, ports, Docker, Compose
+configuration, public HTTPS, MCP initialization, and the browser login console.
+Docker and Docker Compose are installed when necessary.
 
-### Environment variables
+The `master` URL is a moving, unpinned installer. Use an immutable release tag
+for production automation after that release and its checksum assets actually
+exist. Do not substitute an example version that has not been published.
 
-All defaults can be overridden:
+### Verify the installation
 
-| Variable | Default | Description |
-|---|---|---|
-| `CHROME_BIN` | `/usr/bin/google-chrome` | Path to Chrome binary |
-| `CHROME_MCP_PROFILE` | `~/.config/chrome-mcp-profile` | Profile directory used by the service |
-| `TOKEN_FILE` | `~/.config/mcp-bearer-token.env` | Where the bearer token is stored |
-| `CDP_PORT` | `9222` | Chrome DevTools Protocol port (internal) |
-| `MCP_INTERNAL_PORT` | `8931` | Playwright MCP port (internal) |
-| `MCP_PUBLIC_PORT` | `8932` | nginx public port |
-
-## HTTPS Setup (recommended for public internet)
-
-After running `setup.sh`, secure the endpoint with a Let's Encrypt certificate:
+The installer creates a boot-enabled `remote-chrome.service` and installs the
+root-only management command:
 
 ```bash
-# 1. Install certbot
-sudo apt install -y certbot python3-certbot-nginx
-
-# 2. Obtain certificate (port 80 must be reachable)
-sudo certbot certonly --nginx -d <your-domain> --non-interactive --agree-tos -m <your-email>
-
-# 3. Write HTTPS nginx config (replace token, domain, and internal port as needed)
-sudo tee /etc/nginx/sites-available/playwright-mcp > /dev/null << 'EOF'
-map $http_authorization $mcp_auth_ok {
-    "Bearer <your-token>" 1;
-    default               0;
-}
-server {
-    listen 80; listen [::]:80;
-    server_name <your-domain>;
-    location /.well-known/acme-challenge/ { root /var/www/html; }
-    location / { return 301 https://$host$request_uri; }
-}
-server {
-    listen 443 ssl; listen [::]:443 ssl;
-    server_name <your-domain>;
-    ssl_certificate     /etc/letsencrypt/live/<your-domain>/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/<your-domain>/privkey.pem;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    location / {
-        if ($mcp_auth_ok = 0) { return 401 '{"error":"Unauthorized"}'; }
-        proxy_pass         http://127.0.0.1:8931;
-        proxy_http_version 1.1;
-        proxy_set_header   Host "localhost:8931";
-        proxy_set_header   Connection "";
-        proxy_buffering    off; proxy_cache off;
-        proxy_read_timeout 3600s; proxy_send_timeout 3600s;
-        add_header Content-Type application/json always;
-    }
-}
-EOF
-sudo nginx -t && sudo systemctl reload nginx
+sudo remote-chrome status
+sudo remote-chrome credentials
 ```
 
-Certbot's systemd timer handles automatic renewal.
+`status` verifies the containers, headed Chrome, MCP initialization, public
+authentication, TLS, noVNC, and the noVNC WebSocket.
 
-## Client Configuration
+`credentials` prints password-equivalent secrets. Run it only in a trusted SSH
+terminal and store the output in a password manager. Do not paste it into chat,
+issues, logs, or shell transcripts.
 
-Connect your MCP client to:
+The handoff includes:
 
+- the preferred MCP endpoint;
+- the MCP bearer token;
+- the token-in-URL compatibility endpoint;
+- the `/login/` page;
+- the one-click noVNC URL;
+- the fallback noVNC username and password.
+
+## Connect an MCP client
+
+Bearer-header authentication is preferred:
+
+```text
+URL: https://chrome.example.com/mcp
+Authorization: Bearer <MCP_TOKEN>
 ```
-https://chrome.eladrave.com/mcp
+
+For clients that cannot send custom headers, use the exact compatibility URL
+reported by `sudo remote-chrome credentials`:
+
+```text
+https://chrome.example.com/<MCP_TOKEN>/mcp
 ```
 
-with the `Authorization: Bearer <token>` header.
-
-### Warp / Oz
-
-Add to Warp's MCP settings (Settings → MCP Servers):
-
-```json
-{
-  "url": "https://chrome.eladrave.com/mcp",
-  "headers": {
-    "Authorization": "Bearer <token>"
-  }
-}
-```
-
-### ChatGPT Desktop / Codex CLI
+For a TOML-based MCP client:
 
 ```toml
 [mcp_servers.remote_chrome]
-url = "https://chrome.eladrave.com/mcp"
-headers = { Authorization = "Bearer <token>" }
+url = "https://chrome.example.com/mcp"
+headers = { Authorization = "Bearer <MCP_TOKEN>" }
 tool_timeout_sec = 120
 ```
 
-### Claude Desktop
+For a JSON-based MCP client:
 
 ```json
 {
   "mcpServers": {
-    "playwright": {
-      "url": "https://chrome.eladrave.com/mcp",
+    "remote_chrome": {
+      "url": "https://chrome.example.com/mcp",
       "headers": {
-        "Authorization": "Bearer <token>"
+        "Authorization": "Bearer <MCP_TOKEN>"
       }
     }
   }
 }
 ```
 
-Your current token is always in `~/.config/mcp-bearer-token.env`.
+Use only one authentication form at a time. A token embedded in a URL may be
+retained by client telemetry or configuration history, so prefer the bearer
+header whenever the client supports it.
 
-## Logging In to Sites
+## Human login and verification
 
-Chrome runs headless as a service — you cannot interact with it directly. To log in to a site:
+When a site asks for a password, MFA, CAPTCHA, security key, consent, or another
+human-only step, the agent should call:
 
-```bash
-./login.sh
+```text
+remote_chrome_request_human_intervention
 ```
 
-This stops the services, opens Chrome **headed** with your MCP profile, lets you log in manually, and restarts the services once you close Chrome. Your new cookies are immediately available to the MCP server.
+This read-only MCP tool accepts no arguments and returns the protected one-click
+noVNC URL. The workflow is:
 
-## Checking Status
+1. The agent stops browser interaction and calls the handoff tool.
+2. The user opens the returned URL in a trusted browser.
+3. The user completes the human-only step in the visible Chrome window.
+4. The user tells the agent that control is returned.
+5. The agent takes a fresh snapshot and continues.
 
-```bash
-./status.sh
+Never send a site username, password, MFA code, recovery code, security-key
+data, or CAPTCHA answer to the MCP tool or agent. Enter it directly in the
+noVNC browser. The one-click URL itself is a reusable password-equivalent secret
+until server credentials are rotated.
+
+Basic Auth at `https://chrome.example.com/login/` remains available as a
+fallback. Both access methods control the same Chrome used by MCP.
+
+## Persistent browser state
+
+The VM installer bind-mounts the Chrome profile from:
+
+```text
+<data-directory>/profile
 ```
 
-Shows service states, CDP reachability, and runs an end-to-end MCP smoke test.
+Website cookies and local storage survive:
 
-## Managing Services
+- MCP client disconnects and new MCP protocol sessions;
+- Chrome and container restarts;
+- container recreation during an update;
+- host reboots.
 
-```bash
-# Restart everything
-systemctl --user restart chrome-mcp.service
-sleep 5
-systemctl --user restart playwright-mcp.service
+MCP session IDs and snapshot element references are intentionally temporary.
+Take a fresh snapshot after reconnecting or after a human handoff.
 
-# View live logs
-journalctl --user -u chrome-mcp.service -f
-journalctl --user -u playwright-mcp.service -f
+A website can still expire or revoke its own login. In that case, use the
+human-intervention tool again; do not clear or replace the rest of the profile.
 
-# Stop
-systemctl --user stop playwright-mcp.service chrome-mcp.service
+Protect the profile directory as sensitive data. It contains authenticated
+browser state. Never run `docker compose down --volumes` against a direct
+Compose installation unless profile deletion is intentional.
 
-# Start
-systemctl --user start chrome-mcp.service
-sleep 5
-systemctl --user start playwright-mcp.service
-```
+## Operations
 
-## Uninstalling
+### VM installer deployment
 
 ```bash
-./uninstall.sh
+# Full health and deployment status
+sudo remote-chrome status
+
+# Protected MCP and noVNC handoff
+sudo remote-chrome credentials
+
+# Public login URL and username, without printing the password
+sudo remote-chrome login
+
+# Wait until the service is ready
+sudo remote-chrome wait-ready
+
+# Update from the moving master branch
+sudo remote-chrome update --version master --allow-unpinned
+
+# Create a configured, quiesced GCS profile backup
+sudo remote-chrome backup
+
+# Restore an exact validated backup manifest
+sudo remote-chrome restore \
+  gs://example-backups/remote-chrome/<exact-backup>.manifest
+
+# Remove the application while preserving profile data by default
+sudo remote-chrome uninstall
 ```
 
-Removes services, nginx config, and the Chrome profile copy. Your original `~/.config/google-chrome` and bearer token file are untouched.
+Use a published immutable release instead of `master` when one is available.
+Activation health-checks the replacement and attempts to recover the previous
+release if activation fails.
 
-## Security Notes
+Restore replaces the live profile after validation. Confirm the exact manifest
+before running it. Destructive uninstall options require explicit flags and
+confirmation.
 
-- **CDP port 9222 is bound to `127.0.0.1` only** — never exposed publicly. CDP access is full control of that Chrome instance including all sessions and cookies.
-- The **bearer token is the only public-facing auth**. Keep it secret and rotate it by deleting `~/.config/mcp-bearer-token.env` and re-running `setup.sh`.
-- The endpoint is served over **HTTPS (TLS 1.2/1.3)** with a Let's Encrypt certificate that auto-renews every 90 days via certbot's systemd timer.
-- The Chrome MCP profile is a **copy** of your real profile. Cookies written during MCP sessions stay in the copy and do not affect your normal Chrome.
+### Logs
+
+```bash
+sudo journalctl -u remote-chrome.service -f
+```
+
+For container-level inspection, first use `sudo remote-chrome status`. The
+management interface is the canonical view of an installed VM deployment.
+
+## Direct Docker Compose installation
+
+Use this path on a machine that already has Docker Engine and Docker Compose v2.
+It uses Docker named volumes instead of the VM installer's host bind mounts and
+management CLI.
+
+```bash
+git clone https://github.com/eladrave/remotechromemcp.git
+cd remotechromemcp
+./scripts/bootstrap-docker.sh \
+  --domain chrome.example.com \
+  --email admin@example.com
+```
+
+The bootstrap script:
+
+- generates independent MCP, one-click login, and Basic Auth credentials;
+- writes the ignored `.env` file with mode `600`;
+- builds and starts the Compose stack;
+- waits for both services to become healthy;
+- verifies public MCP and both noVNC authentication methods;
+- prints the connection handoff.
+
+The generated Basic Auth password is shown once. Save it immediately.
+
+Later operations:
+
+```bash
+docker compose --env-file .env ps
+docker compose --env-file .env logs -f
+docker compose --env-file .env up -d --build
+docker compose --env-file .env down
+```
+
+The final command stops and removes containers and networks but preserves named
+volumes. Do not add `--volumes` unless permanent browser-state deletion is
+intended.
+
+## Public and private ports
+
+Only Caddy publishes host ports:
+
+| Port | Exposure | Purpose |
+|---|---|---|
+| TCP 80 | Public | ACME challenge and HTTPS redirect |
+| TCP 443 | Public | MCP and noVNC over HTTPS |
+| TCP 8931 | Container network only | Playwright MCP |
+| TCP 6080 | Container network only | noVNC |
+| TCP 5900 | Container only | VNC |
+| TCP 9222 | Container loopback only | Chrome DevTools Protocol |
+
+Never publish TCP 5900, 6080, 8931, or 9222 to the public host.
+
+## Security model
+
+- MCP and noVNC use separate random credentials.
+- The preferred MCP endpoint requires a bearer header.
+- The compatibility MCP URL and one-click noVNC URL contain secrets.
+- The one-click login exchanges its token for an eight-hour Secure, HttpOnly,
+  SameSite=Strict cookie and redirects to a clean `/login/` URL.
+- Caddy discards access logs so secret-bearing paths are not written there.
+- Chrome, VNC, noVNC, and MCP run as an unprivileged container user.
+- The VM installer stores credentials in root-only managed files.
+- CDP and VNC are never public.
+- The persistent profile must be protected like a credential store.
+
+Rotate credentials if a token URL is exposed. Do not commit `.env`, credential
+files, cookies, profile data, backup archives, or URLs containing live tokens.
+
+## Backup and recovery
+
+The VM installer can configure a private GCS bucket and systemd backup timer.
+Backups stop browser writes, archive the profile, upload the archive plus
+checksum and manifest, and restart the browser. Restore validates the manifest,
+checksum, archive paths, and installation identity before replacing the
+profile; failed activation attempts roll back to the prior profile.
+
+For a Google Compute Engine walkthrough with a static address, dedicated service
+account, persistent disk, firewall rules, and bucket-scoped IAM, see
+[docs/gce-manual.md](docs/gce-manual.md).
 
 ## Troubleshooting
 
-**Services won't start after reboot**
+### The installer reports a DNS mismatch
 
-Check if linger is enabled:
+Confirm the public `A` record points to the VM. Remove or correct an `AAAA`
+record that points elsewhere, wait for DNS propagation, and rerun.
+
+### Ports 80 or 443 are already in use
+
+The installer intentionally refuses to take them over. Decide which proxy owns
+the host before retrying; do not expose the internal browser ports as a
+workaround.
+
+### MCP initialization fails
+
+Run:
+
 ```bash
-loginctl show-user "$USER" | grep Linger
+sudo remote-chrome status
+sudo remote-chrome credentials
 ```
-If `Linger=no`, run `loginctl enable-linger "$USER"`.
 
-**Chrome exits with status=21 (SingletonLock)**
+Use the exact endpoint and authentication mode from the protected credentials
+output. A stale token URL fails during initialization, while an expired MCP
+session requires a new initialization.
 
-The profile has a stale lock file. The service clears it automatically via `ExecStartPre`, but you can also run:
+### The noVNC page opens but does not connect
+
+Check `sudo remote-chrome status`. It validates both the page and WebSocket
+upgrade. Do not expose port 6080 directly.
+
+### A website is signed out
+
+Sites can expire their own sessions. Ask the agent to call
+`remote_chrome_request_human_intervention`, complete login in noVNC, return
+control, and take a fresh snapshot.
+
+### Profile state disappears
+
+Confirm the same configured data directory or Docker named volume is mounted.
+Do not run two Chrome processes against the same profile and do not delete the
+profile volume during updates.
+
+## Validation
+
+Install Node dependencies before running repository tests:
+
 ```bash
-rm -f ~/.config/chrome-mcp-profile/Singleton*
-systemctl --user restart chrome-mcp.service
+npm ci
+bash tests/run.sh
 ```
 
-**HTTP 403 from MCP endpoint**
+Run the full Docker runtime test separately:
 
-The nginx `Host` header must be `localhost:<MCP_INTERNAL_PORT>`. This is set in the nginx config. If you changed the port, re-run `setup.sh`.
+```bash
+bash tests/compose-smoke.test.sh
+```
 
-**HTTP 401 with correct token**
+The runtime test builds the image and verifies headed Chrome, public
+authentication, multi-call MCP sessions, the human-intervention tool, noVNC,
+WebSocket proxying, profile persistence across container recreation, and that
+private ports are not published.
 
-The token in the nginx config doesn't match. Re-run `setup.sh` to regenerate the nginx config from the current token file.
+## Additional documentation
 
-**Chrome crashes / high memory**
+- [Generic VM installation and operations](docs/vm-install.md)
+- [Google Compute Engine manual setup](docs/gce-manual.md)
+- [Remote login and profile persistence](docs/remote-login.md)
+- [Agent operating skill](skills/remote-chrome-mcp/SKILL.md)
 
-The headless Chrome instance loads your full profile including extensions. Disable heavy extensions in the MCP profile via `./login.sh` to reduce memory usage.
+## Current boundaries
+
+- Google Cloud Run is not supported by this implementation.
+- The deployment is designed for one persistent browser host, not horizontal
+  auto-scaling.
+- A third-party website can always expire or revoke its own session.
+- The native `setup.sh`, `login.sh`, `status.sh`, and `uninstall.sh` path is
+  retained for legacy rollback only.
