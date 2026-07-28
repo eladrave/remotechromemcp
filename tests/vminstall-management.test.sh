@@ -483,10 +483,17 @@ for candidate in \
 done
 
 first_token=$(read_env_value "$credentials_candidate" MCP_TOKEN)
+first_login_token=$(read_env_value "$credentials_candidate" LOGIN_TOKEN)
 first_password=$(read_env_value "$credentials_candidate" LOGIN_PASSWORD)
 first_hash=$(read_env_value "$compose_candidate" LOGIN_PASSWORD_HASH)
 [[ $first_token =~ ^[0-9a-f]{64}$ ]] ||
   fail 'first install token must be 64 lowercase hex characters'
+[[ $first_login_token =~ ^[0-9a-f]{64}$ &&
+   $first_login_token != "$first_token" ]] ||
+  fail 'one-click login token must be an independent 64 lowercase hex value'
+[[ $(read_env_value "$credentials_candidate" LOGIN_TOKEN_URL) == \
+   "https://chrome.example.com/login/?token=$first_login_token" ]] ||
+  fail 'credentials must include the exact one-click login URL'
 [[ ${#first_password} -ge 64 && $first_password != "$first_token" ]] ||
   fail 'login password must be generated independently from at least 36 random bytes'
 grep -Fxq 'openssl <rand> <-base64> <48>' "$fake_log" ||
@@ -526,6 +533,8 @@ touch "$canonical_data/caddy-data/preserve" "$canonical_data/caddy-config/preser
 
 grep -Fxq "LOGIN_PASSWORD_HASH='$first_hash'" "$compose_candidate" ||
   fail 'bcrypt value must remain single-quoted for Compose dollar safety'
+grep -Fxq "LOGIN_TOKEN=$first_login_token" "$compose_candidate" ||
+  fail 'Compose must receive the one-click login token'
 grep -Fxq 'PROXY_BIND_ADDRESS=0.0.0.0' "$compose_candidate" ||
   fail 'Compose must bind the proxy only on all public interfaces'
 grep -Fxq 'PROXY_HTTP_PORT=80' "$compose_candidate" ||
@@ -593,6 +602,9 @@ ROTATE_CREDENTIALS=0
 vm_prepare_config
 [[ $(read_env_value "$credentials_candidate" MCP_TOKEN) == "$first_token" ]] ||
   fail 'reinstall must preserve the MCP token'
+[[ $(read_env_value "$credentials_candidate" LOGIN_TOKEN) == \
+   "$first_login_token" ]] ||
+  fail 'reinstall must preserve the one-click login token'
 [[ $(read_env_value "$credentials_candidate" LOGIN_USERNAME) == remotechrome ]] ||
   fail 'reinstall must preserve the login username'
 [[ $(read_env_value "$credentials_candidate" LOGIN_PASSWORD) == "$first_password" ]] ||
@@ -663,11 +675,16 @@ vm_prepare_config
 ROTATE_CREDENTIALS=1
 vm_prepare_config
 rotated_token=$(read_env_value "$credentials_candidate" MCP_TOKEN)
+rotated_login_token=$(read_env_value "$credentials_candidate" LOGIN_TOKEN)
 rotated_password=$(read_env_value "$credentials_candidate" LOGIN_PASSWORD)
 [[ $rotated_token =~ ^[0-9a-f]{64}$ && $rotated_token != "$first_token" ]] ||
   fail 'explicit rotation must change the MCP authentication domain'
 [[ $rotated_password != "$first_password" ]] ||
   fail 'explicit rotation must change the login authentication domain'
+[[ $rotated_login_token =~ ^[0-9a-f]{64}$ &&
+   $rotated_login_token != "$first_login_token" &&
+   $rotated_login_token != "$rotated_token" ]] ||
+  fail 'explicit rotation must replace the independent one-click login token'
 
 newline_domain="$(printf 'chrome.example.com\ninjected.example.com')"
 DOMAIN=$newline_domain
@@ -844,6 +861,9 @@ certificate_state="$REMOTE_CHROME_CONFIG_ROOT/certificate.env"
 
 vm_print_connection_handoff
 installed_token=$(read_env_value "$REMOTE_CHROME_CONFIG_ROOT/credentials.env" MCP_TOKEN)
+installed_login_token=$(
+  read_env_value "$REMOTE_CHROME_CONFIG_ROOT/credentials.env" LOGIN_TOKEN
+)
 installed_password=$(read_env_value "$REMOTE_CHROME_CONFIG_ROOT/credentials.env" LOGIN_PASSWORD)
 installed_hash=$(read_env_value "$REMOTE_CHROME_CONFIG_ROOT/compose.env" LOGIN_PASSWORD_HASH)
 for handoff_text in \
@@ -852,6 +872,7 @@ for handoff_text in \
   "Authorization: Bearer $installed_token" \
   "Compatibility MCP URL: https://chrome.example.com/$installed_token/mcp" \
   'Login URL: https://chrome.example.com/login/' \
+  "One-click login URL: https://chrome.example.com/login/?token=$installed_login_token" \
   'Login username: remotechrome' \
   "Login password: $installed_password" \
   'Certificate: ready (public HTTPS verified during activation)' \
@@ -1375,11 +1396,13 @@ for status_text in \
 done
 cli_token=$(read_env_value \
   "$cli_root/etc/remote-chrome/credentials.env" MCP_TOKEN)
+cli_login_token=$(read_env_value \
+  "$cli_root/etc/remote-chrome/credentials.env" LOGIN_TOKEN)
 cli_password=$(read_env_value \
   "$cli_root/etc/remote-chrome/credentials.env" LOGIN_PASSWORD)
 cli_hash=$(read_env_value \
   "$cli_root/etc/remote-chrome/compose.env" LOGIN_PASSWORD_HASH)
-for secret in "$cli_token" "$cli_password" "$cli_hash"; do
+for secret in "$cli_token" "$cli_login_token" "$cli_password" "$cli_hash"; do
   ! grep -Fq -- "$secret" "$cli_root/status.stdout" ||
     fail 'status must not print installed secrets'
   ! grep -Fq -- "$secret" "$cli_root/status.stderr" ||
@@ -1424,6 +1447,8 @@ grep -Fxq 'Login username: remotechrome' "$cli_root/login.stdout" ||
   fail 'login must never print the password'
 ! grep -Fq -- "$cli_token" "$cli_root/login.stdout" ||
   fail 'login must never print the token'
+! grep -Fq -- "$cli_login_token" "$cli_root/login.stdout" ||
+  fail 'login must never print the one-click token'
 
 : >"$REMOTE_CHROME_PROTOCOL_LOG"
 run_cli "$cli_root" wait-ready >"$cli_root/wait-ready.stdout" \
@@ -1433,7 +1458,7 @@ run_cli "$cli_root" wait-ready >"$cli_root/wait-ready.stdout" \
   fail 'wait-ready must require MCP, Basic login, and WebSocket readiness'
 [[ ! -s $cli_root/wait-ready.stdout ]] ||
   fail 'wait-ready must remain quiet on success'
-for secret in "$cli_token" "$cli_password" "$cli_hash"; do
+for secret in "$cli_token" "$cli_login_token" "$cli_password" "$cli_hash"; do
   ! grep -Fq -- "$secret" "$cli_root/wait-ready.stderr" ||
     fail 'wait-ready must not print installed secrets'
 done

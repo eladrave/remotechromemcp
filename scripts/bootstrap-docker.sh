@@ -119,6 +119,10 @@ bootstrap_main() {
   mcp_token="$(openssl rand -hex 32)"
   [[ ${#mcp_token} -eq 64 ]] || fail 'Failed to generate a 64-hex MCP token'
 
+  login_token="$(openssl rand -hex 32)"
+  [[ ${#login_token} -eq 64 && "$login_token" != "$mcp_token" ]] ||
+    fail 'Failed to generate an independent 64-hex login token'
+
   login_password="$(openssl rand -base64 36 | tr '+/' '-_')"
   [[ ${#login_password} -eq 48 ]] ||
     fail 'Failed to generate a login password from 36 random bytes'
@@ -140,6 +144,7 @@ bootstrap_main() {
     printf 'DOMAIN=%s\n' "$domain"
     printf "ACME_EMAIL='%s'\n" "$acme_email"
     printf 'MCP_TOKEN=%s\n' "$mcp_token"
+    printf 'LOGIN_TOKEN=%s\n' "$login_token"
     printf 'LOGIN_USERNAME=%s\n' "$login_username"
     printf "LOGIN_PASSWORD_HASH='%s'\n" "$login_password_hash"
     printf 'PLAYWRIGHT_MCP_VERSION=0.0.78\n'
@@ -159,6 +164,7 @@ bootstrap_main() {
   mcp_headers="$verification_dir/mcp.headers"
   mcp_body="$verification_dir/mcp.body"
   login_body="$verification_dir/login.html"
+  login_cookies="$verification_dir/login.cookies"
   mcp_session_id=
   cleanup_verification() {
     if [[ -n "$mcp_session_id" ]]; then
@@ -200,6 +206,25 @@ bootstrap_main() {
   grep -q 'REMOTE_CHROME_PLAYBOOK_VERSION=1' "$mcp_body" ||
     fail 'Authenticated public MCP response is missing the playbook marker'
 
+  wrong_login_code="$(
+    curl --silent --show-error --max-time 15 \
+      --resolve "${domain}:443:127.0.0.1" \
+      --output /dev/null \
+      --write-out '%{http_code}' \
+      "https://${domain}/login/?token=invalid"
+  )"
+  [[ "$wrong_login_code" == 401 ]] ||
+    fail "Invalid one-click login token returned HTTP $wrong_login_code"
+
+  curl --fail --silent --show-error --max-time 15 \
+    --resolve "${domain}:443:127.0.0.1" \
+    --location \
+    --cookie-jar "$login_cookies" \
+    --output "$login_body" \
+    "https://${domain}/login/?token=${login_token}"
+  grep -qi 'noVNC' "$login_body" ||
+    fail 'One-click login token did not establish a noVNC session'
+
   curl --fail --silent --show-error --max-time 15 \
     --resolve "${domain}:443:127.0.0.1" \
     --user "$login_username:$login_password" \
@@ -217,6 +242,8 @@ bootstrap_main() {
   printf 'Authorization: Bearer <MCP_TOKEN from .env>\n'
   printf 'Compatibility endpoint: https://%s/<MCP_TOKEN from .env>/mcp\n' "$domain"
   printf 'Login URL: https://%s/login/\n' "$domain"
+  printf 'One-click login URL: https://%s/login/?token=%s\n' \
+    "$domain" "$login_token"
   printf 'Login username: %s\n' "$login_username"
   printf 'Login password (shown once): %s\n' "$login_password"
 }

@@ -43,6 +43,10 @@ vm_management_load_installed_state() {
     vm_read_env_value "$credentials" MCP_COMPATIBILITY_URL
   ) || return 1
   LOGIN_URL=$(vm_read_env_value "$credentials" LOGIN_URL) || return 1
+  LOGIN_TOKEN=$(vm_read_env_value "$credentials" LOGIN_TOKEN) || return 1
+  LOGIN_TOKEN_URL=$(
+    vm_read_env_value "$credentials" LOGIN_TOKEN_URL
+  ) || return 1
   LOGIN_USERNAME=$(
     vm_read_env_value "$credentials" LOGIN_USERNAME
   ) || return 1
@@ -54,7 +58,10 @@ vm_management_load_installed_state() {
     vm_validate_email "$ACME_EMAIL" &&
     vm_validate_config_value "$REMOTE_CHROME_DATA_DIR" &&
     { [[ -z $GCS_BUCKET ]] || vm_validate_gcs_bucket "$GCS_BUCKET"; } &&
-    [[ $MCP_URL == "https://$DOMAIN/mcp" &&
+    [[ $LOGIN_TOKEN =~ ^[0-9a-f]{64}$ &&
+       $LOGIN_TOKEN != "$MCP_TOKEN" &&
+       $LOGIN_TOKEN_URL == "https://$DOMAIN/login/?token=$LOGIN_TOKEN" &&
+       $MCP_URL == "https://$DOMAIN/mcp" &&
        $LOGIN_URL == "https://$DOMAIN/login/" ]]
 }
 

@@ -704,7 +704,8 @@ vm_print_connection_handoff() {
   fi
   [[ -w $tty ]] || return 1
 
-  local mcp_url mcp_token compatibility_url login_url username password
+  local mcp_url mcp_token compatibility_url login_url login_token_url
+  local username password
   local data_dir profile certificate_status certificate_issuer
   local certificate_expires certificate_state
   mcp_url=$(vm_read_env_value "$credentials" MCP_URL) || return 1
@@ -713,6 +714,9 @@ vm_print_connection_handoff() {
     vm_read_env_value "$credentials" MCP_COMPATIBILITY_URL
   ) || return 1
   login_url=$(vm_read_env_value "$credentials" LOGIN_URL) || return 1
+  login_token_url=$(
+    vm_read_env_value "$credentials" LOGIN_TOKEN_URL
+  ) || return 1
   username=$(vm_read_env_value "$credentials" LOGIN_USERNAME) || return 1
   password=$(vm_read_env_value "$credentials" LOGIN_PASSWORD) || return 1
   data_dir=$(
@@ -740,6 +744,7 @@ vm_print_connection_handoff() {
       "Authorization: Bearer $mcp_token" \
       "Compatibility MCP URL: $compatibility_url" \
       "Login URL: $login_url" \
+      "One-click login URL: $login_token_url" \
       "Login username: $username" \
       "Login password: $password" \
       'Certificate: ready (public HTTPS verified during activation)' \

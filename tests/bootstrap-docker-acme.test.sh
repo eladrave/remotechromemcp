@@ -22,7 +22,16 @@ set -euo pipefail
 
 case "$*" in
   'rand -hex 32')
-    printf 'a%.0s' {1..64}
+    counter_file="${BASH_SOURCE[0]}.hex-count"
+    counter=0
+    [[ ! -f "$counter_file" ]] || read -r counter <"$counter_file"
+    counter=$((counter + 1))
+    printf '%s\n' "$counter" >"$counter_file"
+    if ((counter % 2 == 1)); then
+      printf 'a%.0s' {1..64}
+    else
+      printf 'c%.0s' {1..64}
+    fi
     printf '\n'
     ;;
   'rand -base64 36')
@@ -95,6 +104,11 @@ run_until_compose_config \
   --domain chrome.example.test \
   --email 'ops$tag@example.com'
 assert_email_line "ACME_EMAIL='ops\$tag@example.com'"
+bootstrap_mcp_token="$(sed -n 's/^MCP_TOKEN=//p' "$test_repo/.env")"
+bootstrap_login_token="$(sed -n 's/^LOGIN_TOKEN=//p' "$test_repo/.env")"
+[[ "$bootstrap_login_token" =~ ^[0-9a-f]{64}$ &&
+   "$bootstrap_login_token" != "$bootstrap_mcp_token" ]] ||
+  fail 'bootstrap must generate an independent 64-hex login token'
 
 if [[ -n "${STANDALONE_COMPOSE:-}" ]]; then
   [[ -x "$STANDALONE_COMPOSE" ]] ||

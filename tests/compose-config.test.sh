@@ -55,6 +55,7 @@ sed -i \
   -e 's/^DOMAIN=.*/DOMAIN=chrome.example.test/' \
   -e 's/^ACME_EMAIL=.*/ACME_EMAIL=admin@example.test/' \
   -e 's/^MCP_TOKEN=.*/MCP_TOKEN=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/' \
+  -e 's/^LOGIN_TOKEN=.*/LOGIN_TOKEN=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210/' \
   -e 's/^LOGIN_USERNAME=.*/LOGIN_USERNAME=testoperator/' \
   -e "s|^LOGIN_PASSWORD_HASH=.*|LOGIN_PASSWORD_HASH='$expected_hash'|" \
   "$env_file"
@@ -161,6 +162,11 @@ assert.match(caddy, /\/\{\$MCP_TOKEN\}\/mcp/);
 assert.match(caddy, /method POST DELETE/);
 assert.match(caddy, /respond 405/);
 assert.match(caddy, /\/login\/\*/);
+assert.match(caddy, /query token=\{\$LOGIN_TOKEN\}/);
+assert.match(caddy, /remote_chrome_login=\{\$LOGIN_TOKEN\}/);
+assert.match(caddy, /HttpOnly; Secure; SameSite=Strict/);
+assert.match(caddy, /redir \* \/login\/ 303/);
+assert.match(caddy, /header_regexp loginCookie Cookie/);
 assert.match(caddy, /basic_auth/);
 assert.match(caddy, /\{\$LOGIN_USERNAME\} \{\$LOGIN_PASSWORD_HASH\}/);
 assert.match(caddy, /reverse_proxy browser:8931/);

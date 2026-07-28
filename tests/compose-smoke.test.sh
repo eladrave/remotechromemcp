@@ -40,6 +40,7 @@ project_name="remote-chrome-smoke-$(date +%s)-$$"
 env_file="$tmp_dir/compose.env"
 sentinel='.compose-smoke-profile-sentinel'
 MCP_TOKEN=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+LOGIN_TOKEN=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
 LOGIN_USERNAME=smokeoperator
 LOGIN_PASSWORD=hiccup
 http_port="$(allocate_port)"
@@ -59,6 +60,7 @@ trap cleanup EXIT
   printf 'DOMAIN=localhost\n'
   printf 'ACME_EMAIL=admin@example.test\n'
   printf 'MCP_TOKEN=%s\n' "$MCP_TOKEN"
+  printf 'LOGIN_TOKEN=%s\n' "$LOGIN_TOKEN"
   printf 'LOGIN_USERNAME=%s\n' "$LOGIN_USERNAME"
   printf '%s\n' \
     "LOGIN_PASSWORD_HASH='\$2a\$14\$Zkx19XLiW6VYouLHR5NmfOFU0z2GTNmpkT/5qqR7hx4IjWJPDhjvG'"
@@ -321,6 +323,51 @@ login_unauth_code="$(
 [[ "$login_unauth_code" == 401 ]] ||
   fail "unauthenticated /login/ expected 401, got $login_unauth_code"
 
+invalid_login_token_code="$(
+  "${curl_https[@]}" --output /dev/null --write-out '%{http_code}' \
+    "$base_url/login/?token=invalid"
+)"
+[[ "$invalid_login_token_code" == 401 ]] ||
+  fail "invalid one-click login token expected 401, got $invalid_login_token_code"
+
+login_token_headers="$tmp_dir/login-token.headers"
+login_token_cookies="$tmp_dir/login-token.cookies"
+login_token_code="$(
+  "${curl_https[@]}" \
+    --output /dev/null \
+    --dump-header "$login_token_headers" \
+    --cookie-jar "$login_token_cookies" \
+    --write-out '%{http_code}' \
+    "$base_url/login/?token=$LOGIN_TOKEN"
+)"
+[[ "$login_token_code" == 303 ]] ||
+  fail "valid one-click login token expected 303, got $login_token_code"
+tr -d '\r' <"$login_token_headers" |
+  grep -Eiq '^Location:[[:space:]]*/login/[[:space:]]*$' ||
+  fail 'one-click login must redirect to a clean /login/ URL'
+tr -d '\r' <"$login_token_headers" |
+  grep -Eiq '^Cache-Control:[[:space:]]*no-store[[:space:]]*$' ||
+  fail 'one-click login response must disable caching'
+tr -d '\r' <"$login_token_headers" |
+  grep -Eiq '^Referrer-Policy:[[:space:]]*no-referrer[[:space:]]*$' ||
+  fail 'one-click login response must suppress referrer disclosure'
+tr -d '\r' <"$login_token_headers" |
+  grep -Eiq '^Set-Cookie: remote_chrome_login=.*HttpOnly; Secure; SameSite=Strict' ||
+  fail 'one-click login cookie must be HttpOnly, Secure, and SameSite=Strict'
+
+login_token_body="$tmp_dir/login-token.html"
+login_token_session_code="$(
+  "${curl_https[@]}" \
+    --output "$login_token_body" \
+    --cookie "$login_token_cookies" \
+    --write-out '%{http_code}' \
+    "$base_url/login/"
+)"
+[[ "$login_token_session_code" == 200 ]] ||
+  fail "one-click login cookie expected 200, got $login_token_session_code"
+grep -qi 'noVNC' "$login_token_body" ||
+  fail 'one-click login cookie did not serve noVNC'
+
 login_body="$tmp_dir/login.html"
 login_code="$(
   "${curl_https[@]}" --location \
@@ -335,7 +382,7 @@ grep -qi 'noVNC' "$login_body" ||
 
 login_ui="$tmp_dir/ui.js"
 "${curl_https[@]}" --fail \
-  --user "$LOGIN_USERNAME:$LOGIN_PASSWORD" \
+  --cookie "$login_token_cookies" \
   --output "$login_ui" \
   "$base_url/login/app/ui.js"
 websocket_path="$(
@@ -353,7 +400,7 @@ websocket_curl_status=0
 "${curl_https[@]}" --http1.1 --max-time 3 \
   --output /dev/null \
   --dump-header "$websocket_headers" \
-  --user "$LOGIN_USERNAME:$LOGIN_PASSWORD" \
+  --cookie "$login_token_cookies" \
   --header 'Connection: Upgrade' \
   --header 'Upgrade: websocket' \
   --header 'Sec-WebSocket-Version: 13' \

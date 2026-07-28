@@ -172,6 +172,7 @@ vm_generate_credentials() {
   local rotate=${ROTATE_CREDENTIALS:-0}
 
   MCP_TOKEN=
+  LOGIN_TOKEN=
   LOGIN_USERNAME=remotechrome
   LOGIN_PASSWORD=
   LOGIN_PASSWORD_HASH=
@@ -179,6 +180,10 @@ vm_generate_credentials() {
   if [[ $rotate -eq 0 && -f $installed_credentials ]]; then
     MCP_TOKEN=$(vm_read_env_value "$installed_credentials" MCP_TOKEN) ||
       return 1
+    LOGIN_TOKEN=$(
+      vm_read_env_value "$installed_credentials" LOGIN_TOKEN 2>/dev/null ||
+        true
+    )
     LOGIN_USERNAME=$(
       vm_read_env_value "$installed_credentials" LOGIN_USERNAME
     ) || return 1
@@ -197,6 +202,12 @@ vm_generate_credentials() {
   fi
   [[ $MCP_TOKEN =~ ^[0-9a-f]{64}$ ]] || return 1
 
+  if [[ -z $LOGIN_TOKEN || $rotate -eq 1 ]]; then
+    LOGIN_TOKEN=$(openssl rand -hex 32) || return 1
+  fi
+  [[ $LOGIN_TOKEN =~ ^[0-9a-f]{64}$ &&
+     $LOGIN_TOKEN != "$MCP_TOKEN" ]] || return 1
+
   if [[ -z $LOGIN_PASSWORD || $rotate -eq 1 ]]; then
     LOGIN_PASSWORD=$(openssl rand -base64 48) || return 1
     [[ ${#LOGIN_PASSWORD} -ge 64 ]] || return 1
@@ -214,12 +225,15 @@ vm_generate_credentials() {
   MCP_URL="https://$DOMAIN/mcp"
   MCP_COMPATIBILITY_URL="https://$DOMAIN/$MCP_TOKEN/mcp"
   LOGIN_URL="https://$DOMAIN/login/"
+  LOGIN_TOKEN_URL="https://$DOMAIN/login/?token=$LOGIN_TOKEN"
   local destination="$REMOTE_CHROME_CONFIG_ROOT/credentials.env.candidate"
   {
     printf 'MCP_URL=%s\n' "$MCP_URL"
     printf 'MCP_TOKEN=%s\n' "$MCP_TOKEN"
     printf 'MCP_COMPATIBILITY_URL=%s\n' "$MCP_COMPATIBILITY_URL"
     printf 'LOGIN_URL=%s\n' "$LOGIN_URL"
+    printf 'LOGIN_TOKEN=%s\n' "$LOGIN_TOKEN"
+    printf 'LOGIN_TOKEN_URL=%s\n' "$LOGIN_TOKEN_URL"
     printf 'LOGIN_USERNAME=%s\n' "$LOGIN_USERNAME"
     printf 'LOGIN_PASSWORD=%s\n' "$LOGIN_PASSWORD"
   } | vm_write_secret_file "$destination"
@@ -231,6 +245,7 @@ vm_render_compose_env() {
     printf 'DOMAIN=%s\n' "$DOMAIN"
     printf 'ACME_EMAIL=%s\n' "$(vm_single_quote_dotenv "$ACME_EMAIL")"
     printf 'MCP_TOKEN=%s\n' "$MCP_TOKEN"
+    printf 'LOGIN_TOKEN=%s\n' "$LOGIN_TOKEN"
     printf 'LOGIN_USERNAME=%s\n' "$LOGIN_USERNAME"
     printf 'LOGIN_PASSWORD_HASH=%s\n' \
       "$(vm_single_quote_dotenv "$LOGIN_PASSWORD_HASH")"

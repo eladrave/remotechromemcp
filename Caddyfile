@@ -51,6 +51,29 @@ http://{$DOMAIN} {
 		reverse_proxy browser:8931
 	}
 
+	@login_token_query {
+		path /login/
+		query token={$LOGIN_TOKEN}
+	}
+	handle @login_token_query {
+		header Cache-Control "no-store"
+		header Referrer-Policy "no-referrer"
+		header Set-Cookie "remote_chrome_login={$LOGIN_TOKEN}; Path=/login/; Max-Age=28800; HttpOnly; Secure; SameSite=Strict"
+		redir * /login/ 303
+	}
+
+	@login_token_cookie {
+		path /login/*
+		header_regexp loginCookie Cookie "(^|;[ ]*)remote_chrome_login={$LOGIN_TOKEN}($|;)"
+	}
+	handle @login_token_cookie {
+		uri strip_prefix /login
+		reverse_proxy browser:6080 {
+			header_up Connection {http.request.header.Connection}
+			header_up Upgrade {http.request.header.Upgrade}
+		}
+	}
+
 	handle_path /login/* {
 		basic_auth {
 			{$LOGIN_USERNAME} {$LOGIN_PASSWORD_HASH}

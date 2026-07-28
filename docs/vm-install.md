@@ -74,7 +74,7 @@ instead of guessing.
 On success, the installer writes a root-readable handoff and prints the exact:
 
 - MCP URL and bearer-token form;
-- browser login URL;
+- browser login URL and one-click token URL;
 - login username and generated password;
 - status and credential-retrieval commands.
 
@@ -89,6 +89,14 @@ sudo remote-chrome credentials
 The browser login is web based. An agent or user with no shell opens the
 reported `/login/` URL; routine site login never requires running a remote
 `login.sh`.
+
+The one-click URL has the form
+`https://chrome.example.com/login/?token=<random-login-token>`. A valid token
+is exchanged for a Secure, HttpOnly, SameSite=Strict cookie and immediately
+redirected to the clean `/login/` path. The cookie lasts eight hours and also
+authorizes the noVNC WebSocket. Basic Auth remains available as a fallback.
+Treat the one-click URL like a password: it is reusable until credentials are
+rotated and may remain in browser history or link-sharing systems.
 
 ## Operations
 

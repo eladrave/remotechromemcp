@@ -40,6 +40,7 @@ if command -v docker >/dev/null 2>&1 &&
     printf 'DOMAIN=chrome.example.com\n'
     printf "ACME_EMAIL='%s'\n" "$acme_email"
     printf 'MCP_TOKEN=%s\n' "$(printf 'a%.0s' {1..64})"
+    printf 'LOGIN_TOKEN=%s\n' "$(printf 'b%.0s' {1..64})"
     printf 'LOGIN_USERNAME=remotechrome\n'
     printf "LOGIN_PASSWORD_HASH='%s'\n" "$hash"
     printf 'PLAYWRIGHT_MCP_VERSION=0.0.78\n'
