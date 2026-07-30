@@ -14,6 +14,7 @@ required_concepts=(
   'server instructions'
   'Never clear cookies'
   'remote_chrome_request_human_intervention'
+  'get_novnc_link'
   'accepts no arguments'
 )
 

@@ -41,6 +41,7 @@ required_contracts=(
   'sudo remote-chrome status'
   'sudo remote-chrome credentials'
   'remote_chrome_request_human_intervention'
+  'get_novnc_link'
   'git clone https://github.com/eladrave/remotechromemcp.git'
   'sudo ./scripts/bootstrap-docker.sh'
   'sudo docker compose --env-file .env up -d --build'

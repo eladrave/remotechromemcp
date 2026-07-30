@@ -33,8 +33,9 @@ as a CAPTCHA, MFA, or security key: stop and hand control to the user through
 `/login/`. They never replace explicit confirmation for consequential actions.
 Never put a manually retrieved token/password in chat. The sole handoff
 exception is the protected noVNC URL returned directly by
-`remote_chrome_request_human_intervention`; give that URL only to the requesting
-user and treat it as a password-equivalent secret.
+`remote_chrome_request_human_intervention` or its `get_novnc_link` alias; give
+that URL only to the requesting user and treat it as a password-equivalent
+secret.
 
 ## Installation on a Remote VM
 
@@ -99,11 +100,12 @@ Stop browser interaction when the page requires a password, CAPTCHA, MFA,
 security key, consent, or other human verification. Call
 `remote_chrome_request_human_intervention` with no arguments, give the
 protected noVNC URL returned by the tool to the user, explain the visible step
-to complete, and wait for confirmation that control is returned. Never pass a
+to complete, and wait for confirmation that control is returned. An API
+application may use the equivalent `get_novnc_link` alias. Never pass a
 username, password, MFA code, recovery code, security-key data, or CAPTCHA
-answer to that tool. Do not operate the browser while the user has control. On
-return, take a fresh snapshot before continuing. Never bypass, solve, weaken,
-or reroute a verification control.
+answer to either tool. Do not operate the browser while the user has control.
+On return, take a fresh snapshot before continuing. Never bypass, solve,
+weaken, or reroute a verification control.
 
 Assume the user may have no shell. Never tell them to run `login.sh` remotely
 for routine authentication; they open `/login/` in their own web browser.

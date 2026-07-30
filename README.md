@@ -206,14 +206,20 @@ header whenever the client supports it.
 ## Human login and verification
 
 When a site asks for a password, MFA, CAPTCHA, security key, consent, or another
-human-only step, the agent should call:
+human-only step, the agent should call the canonical tool:
 
 ```text
 remote_chrome_request_human_intervention
 ```
 
-This read-only MCP tool accepts no arguments and returns the protected one-click
-noVNC URL. The workflow is:
+API applications may call the equivalent alias:
+
+```text
+get_novnc_link
+```
+
+Both read-only MCP tools accept no arguments and return the same protected
+one-click noVNC URL. The workflow is:
 
 1. The agent stops browser interaction and calls the handoff tool.
 2. The user opens the returned URL in a trusted browser.

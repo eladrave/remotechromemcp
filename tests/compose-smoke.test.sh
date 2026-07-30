@@ -255,11 +255,13 @@ unauth_mcp_code="$(
 initialize_and_close() {
   local url="$1"
   shift
-  local headers body code content_type_count session_id tools_body handoff_body rejected_body
+  local headers body code content_type_count session_id
+  local tools_body handoff_body novnc_alias_body rejected_body
   headers="$(mktemp "$tmp_dir/public-headers.XXXXXX")"
   body="$(mktemp "$tmp_dir/public-body.XXXXXX")"
   tools_body="$(mktemp "$tmp_dir/public-tools.XXXXXX")"
   handoff_body="$(mktemp "$tmp_dir/public-handoff.XXXXXX")"
+  novnc_alias_body="$(mktemp "$tmp_dir/public-novnc-alias.XXXXXX")"
   rejected_body="$(mktemp "$tmp_dir/public-handoff-rejected.XXXXXX")"
 
   code="$(
@@ -300,6 +302,8 @@ initialize_and_close() {
   [[ "$code" == 200 ]] || fail "public tools/list expected 200, got $code"
   grep -Fq 'remote_chrome_request_human_intervention' "$tools_body" ||
     fail 'public tools/list omitted the human-intervention handoff tool'
+  grep -Fq 'get_novnc_link' "$tools_body" ||
+    fail 'public tools/list omitted the noVNC-link alias'
 
   code="$(
     "${curl_https[@]}" \
@@ -322,13 +326,33 @@ initialize_and_close() {
 
   code="$(
     "${curl_https[@]}" \
+      --output "$novnc_alias_body" \
+      --write-out '%{http_code}' \
+      --request POST \
+      --header 'Content-Type: application/json' \
+      --header 'Accept: application/json, text/event-stream' \
+      --header "Mcp-Session-Id: $session_id" \
+      --data '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_novnc_link","arguments":{}}}' \
+      "$@" \
+      "$url"
+  )"
+  [[ "$code" == 200 ]] ||
+    fail "public get_novnc_link tool expected 200, got $code"
+  grep -Fq "https://localhost/login/?token=$LOGIN_TOKEN" \
+    "$novnc_alias_body" ||
+    fail 'get_novnc_link did not return the configured protected URL'
+  grep -Fq 'Human intervention is required' "$novnc_alias_body" ||
+    fail 'get_novnc_link omitted the user-intervention instruction'
+
+  code="$(
+    "${curl_https[@]}" \
       --output "$rejected_body" \
       --write-out '%{http_code}' \
       --request POST \
       --header 'Content-Type: application/json' \
       --header 'Accept: application/json, text/event-stream' \
       --header "Mcp-Session-Id: $session_id" \
-      --data '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"remote_chrome_request_human_intervention","arguments":{"password":"must-not-be-echoed"}}}' \
+      --data '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"remote_chrome_request_human_intervention","arguments":{"password":"must-not-be-echoed"}}}' \
       "$@" \
       "$url"
   )"

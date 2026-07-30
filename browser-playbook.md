@@ -42,8 +42,9 @@ remote browser is deployed.
 
 - When login or another human-only step is required, call
   `remote_chrome_request_human_intervention` and give the returned protected
-  noVNC URL to the user. The tool accepts no arguments: never pass credentials
-  or verification data to it.
+  noVNC URL to the user. `get_novnc_link` is an equivalent API-friendly alias.
+  Each tool accepts no arguments: never pass credentials or verification data
+  to either one.
 - Never ask the user to send credentials, cookies, tokens, recovery codes, or
   security-key output through chat. Resume only after the user confirms that
   the visible browser session is ready.

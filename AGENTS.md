@@ -334,7 +334,8 @@ The important operational rules are:
 - use element references only from a relevant snapshot in the same MCP
   session;
 - hand passwords, MFA, CAPTCHA, security keys, and verification to the human
-  through `/login/`;
+  through `/login/`, using `remote_chrome_request_human_intervention` or its
+  `get_novnc_link` alias to retrieve the protected URL;
 - never clear the profile unless explicitly asked;
 - require confirmation before purchases or persistent account changes;
 - assume the human may have no shell access.

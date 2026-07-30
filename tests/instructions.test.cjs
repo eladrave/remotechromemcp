@@ -134,6 +134,16 @@ function runToolProbe(loginUrl, toolArguments = {}) {
         },
         {}
       );
+      const novncLink = await server._requestHandlers.get('tools/call')(
+        {
+          method: 'tools/call',
+          params: {
+            name: 'get_novnc_link',
+            arguments: ${JSON.stringify(toolArguments)}
+          }
+        },
+        {}
+      );
       const delegated = await server._requestHandlers.get('tools/call')(
         {
           method: 'tools/call',
@@ -142,7 +152,12 @@ function runToolProbe(loginUrl, toolArguments = {}) {
         {}
       );
 
-      process.stdout.write(JSON.stringify({ list, handoff, delegated }));
+      process.stdout.write(JSON.stringify({
+        list,
+        handoff,
+        novncLink,
+        delegated
+      }));
     }
 
     main().catch(error => {
@@ -184,32 +199,38 @@ test('returns embedded fallback when playbook is empty', () => {
   assert.match(runInitialize('tests/fixtures/invalid-playbook.md').stdout, /REMOTE_CHROME_PLAYBOOK_FALLBACK=1/);
 });
 
-test('publishes a read-only no-argument human-intervention tool', () => {
+test('publishes read-only no-argument human-intervention tool aliases', () => {
   const loginUrl = 'https://chrome.example.test/login/?token=' + 'a'.repeat(64);
   const result = runToolProbe(loginUrl);
   assert.equal(result.status, 0, result.stderr);
   const probe = JSON.parse(result.stdout);
-  const tool = probe.list.tools.find(
-    candidate => candidate.name === 'remote_chrome_request_human_intervention'
-  );
-
-  assert(tool);
-  assert.deepEqual(tool.inputSchema, {
-    type: 'object',
-    properties: {},
-    additionalProperties: false
-  });
-  assert.equal(tool.annotations.readOnlyHint, true);
-  assert.equal(tool.annotations.destructiveHint, false);
-  assert.equal(tool.annotations.idempotentHint, true);
-  assert.equal(tool.annotations.openWorldHint, false);
-  assert.equal(probe.handoff.isError, undefined);
-  assert.ok(probe.handoff.content[0].text.includes(loginUrl));
-  assert.match(probe.handoff.content[0].text, /password-equivalent secret/);
+  for (const name of [
+    'remote_chrome_request_human_intervention',
+    'get_novnc_link'
+  ]) {
+    const tool = probe.list.tools.find(candidate => candidate.name === name);
+    assert(tool, `missing ${name}`);
+    assert.deepEqual(tool.inputSchema, {
+      type: 'object',
+      properties: {},
+      additionalProperties: false
+    });
+    assert.equal(tool.annotations.readOnlyHint, true);
+    assert.equal(tool.annotations.destructiveHint, false);
+    assert.equal(tool.annotations.idempotentHint, true);
+    assert.equal(tool.annotations.openWorldHint, false);
+  }
+  for (const response of [probe.handoff, probe.novncLink]) {
+    assert.equal(response.isError, undefined);
+    assert.ok(response.content[0].text.includes(loginUrl));
+    assert.match(response.content[0].text, /Human intervention is required/);
+    assert.match(response.content[0].text, /password-equivalent secret/);
+  }
+  assert.deepEqual(probe.novncLink, probe.handoff);
   assert.equal(probe.delegated.content[0].text, 'delegated:existing_tool');
 });
 
-test('human-intervention tool rejects all credential-shaped arguments', () => {
+test('human-intervention tool aliases reject all credential-shaped arguments', () => {
   const loginUrl = 'https://chrome.example.test/login/?token=' + 'b'.repeat(64);
   const result = runToolProbe(loginUrl, {
     username: 'not-accepted',
@@ -219,12 +240,17 @@ test('human-intervention tool rejects all credential-shaped arguments', () => {
   assert.equal(result.status, 0, result.stderr);
   const probe = JSON.parse(result.stdout);
 
-  assert.equal(probe.handoff.isError, true);
-  assert.match(probe.handoff.content[0].text, /accepts no arguments/);
-  assert.doesNotMatch(probe.handoff.content[0].text, /not-accepted|must-not-be-echoed|123456/);
+  for (const response of [probe.handoff, probe.novncLink]) {
+    assert.equal(response.isError, true);
+    assert.match(response.content[0].text, /accepts no arguments/);
+    assert.doesNotMatch(
+      response.content[0].text,
+      /not-accepted|must-not-be-echoed|123456/
+    );
+  }
 });
 
-test('human-intervention tool fails closed for a missing or invalid URL', () => {
+test('human-intervention tool aliases fail closed for a missing or invalid URL', () => {
   for (const loginUrl of [
     undefined,
     'http://chrome.example.test/login/?token=' + 'c'.repeat(64),
@@ -234,9 +260,11 @@ test('human-intervention tool fails closed for a missing or invalid URL', () => 
     const result = runToolProbe(loginUrl);
     assert.equal(result.status, 0, result.stderr);
     const probe = JSON.parse(result.stdout);
-    assert.equal(probe.handoff.isError, true);
-    assert.match(probe.handoff.content[0].text, /URL is unavailable/);
-    if (loginUrl)
-      assert.ok(!probe.handoff.content[0].text.includes(loginUrl));
+    for (const response of [probe.handoff, probe.novncLink]) {
+      assert.equal(response.isError, true);
+      assert.match(response.content[0].text, /URL is unavailable/);
+      if (loginUrl)
+        assert.ok(!response.content[0].text.includes(loginUrl));
+    }
   }
 });

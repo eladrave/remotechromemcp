@@ -538,13 +538,19 @@ another human-only step:
 
 1. The agent stops browser actions.
 2. The agent calls `remote_chrome_request_human_intervention` with no
-   arguments.
+   arguments. An API application may call the equivalent `get_novnc_link`
+   alias.
 3. The agent gives the returned protected noVNC URL to the requesting user.
 4. The user enters credentials or completes verification directly in noVNC.
 5. The user returns control.
 6. The agent takes a fresh browser snapshot before continuing.
 
 Never send site credentials or MFA material through MCP or chat.
+
+Both handoff tools are read-only, accept no input, and return the same
+token-embedded `https://<host>/login/?token=<token>` URL plus instructions for
+the user. The canonical tool name is preferred for agents; `get_novnc_link`
+exists for simple API integrations.
 
 The managed deployment stores browser state in:
 
