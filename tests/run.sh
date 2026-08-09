@@ -14,6 +14,7 @@ bash tests/vminstall-backup.test.sh
 bash tests/bootstrap-docker-acme.test.sh
 bash tests/skill-contract.test.sh
 bash tests/installation-doc.test.sh
+bash tests/functional-healthcheck-contract.test.sh
 bash tests/docker-fix-round1.test.sh
 for script in \
   setup.sh login.sh status.sh uninstall.sh \

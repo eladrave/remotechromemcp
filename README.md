@@ -146,6 +146,17 @@ sudo remote-chrome credentials
 `status` verifies the containers, headed Chrome, MCP initialization, public
 authentication, TLS, noVNC, and the noVNC WebSocket.
 
+For ongoing production monitoring, install the optional hourly functional
+healthcheck. Unlike the container's lightweight liveness probe, it performs a
+real read-only `browser_snapshot` through a temporary MCP session:
+
+```bash
+sudo scripts/install-functional-healthcheck.sh
+```
+
+See [`docs/functional-healthcheck.md`](docs/functional-healthcheck.md) for the
+security model, systemd units, verification commands, and failure handling.
+
 `credentials` prints password-equivalent secrets. Run it only in a trusted SSH
 terminal and store the output in a password manager. Do not paste it into chat,
 issues, logs, or shell transcripts.
