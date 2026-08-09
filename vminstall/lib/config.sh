@@ -249,8 +249,9 @@ vm_render_compose_env() {
     printf 'LOGIN_USERNAME=%s\n' "$LOGIN_USERNAME"
     printf 'LOGIN_PASSWORD_HASH=%s\n' \
       "$(vm_single_quote_dotenv "$LOGIN_PASSWORD_HASH")"
-    printf 'PLAYWRIGHT_MCP_VERSION=0.0.78\n'
+    printf 'PLAYWRIGHT_MCP_VERSION=0.0.79\n'
     printf 'SCREEN_GEOMETRY=1440x900x24\n'
+    printf 'REMOTE_CHROME_MCP_REQUEST_DRAIN_TIMEOUT_MS=300000\n'
     printf 'REMOTE_CHROME_DATA_DIR=%s\n' \
       "$(vm_single_quote_dotenv "$REMOTE_CHROME_DATA_DIR")"
     printf 'PROXY_BIND_ADDRESS=0.0.0.0\n'

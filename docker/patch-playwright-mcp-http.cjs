@@ -5,21 +5,23 @@ const fs = require('node:fs');
 const { createRequire } = require('node:module');
 const path = require('node:path');
 
-const EXPECTED_MCP_VERSION = '0.0.78';
-const EXPECTED_PLAYWRIGHT_CORE_VERSION = '1.62.0-alpha-1783623505000';
+const EXPECTED_MCP_VERSION = '0.0.79';
+const EXPECTED_PLAYWRIGHT_CORE_VERSION = '1.63.0-alpha-2026-08-05';
 const EXPECTED_ORIGINAL_SOURCE_SHA256 =
-  'be2e09efef3017b4eaa76f0cb5289f66c4ea57833f94319b17c1c2f184987ad7';
+  'adf9246486a03bee08b2895db057ba470c62377911d291693fe783d91d6fec52';
 const EXPECTED_ORIGINAL_BLOCK_SHA256 =
-  '9d7660e57d171c98b1f56d981de2c3fe3d142d018ed002bd5cb2d493db390ffe';
+  '9a0e47686295f3bb96fdd23015b3be0bad0f4ef706b455bbaa2cc5cec9f5c2a1';
 const EXPECTED_PATCHED_SOURCE_SHA256 =
-  'b9dbbdbb0bfbfbf40aa3af855f575aa866664ec0ab773c6a4ca831c2ce45e161';
+  '96d225418072857aed717efba7b518f919e5ef29ae602ff1a2c9480ec7bc3127';
+const EXPECTED_LIFECYCLE_PATCHED_SOURCE_SHA256 =
+  '5d8ecd37a63e8ade5a8acc85f09b7221a1312af8a5e31763aaaa3ff5f631406e';
 
 const DEFAULT_MCP_PACKAGE_JSON =
   '/usr/local/lib/node_modules/@playwright/mcp/package.json';
 const START_MARKER =
   'async function handleStreamable(serverBackendFactory, req, res, sessions) {';
 const END_MARKER =
-  '\nvar import_assert54, import_crypto27, debug12, SSEServerTransport, StreamableHTTPServerTransport, testDebug2;';
+  '\nvar import_assert54, import_crypto30, debug12, SSEServerTransport, StreamableHTTPServerTransport, testDebug2;';
 const PATCH_MARKER = 'REMOTE_CHROME_MCP_HTTP_SESSION_PATCH=1';
 
 const PATCHED_BLOCK = `// ${PATCH_MARKER}
@@ -36,7 +38,8 @@ async function handleStreamable(serverBackendFactory, req, res, sessions) {
     return true;
   };
   const refreshIdleTimeout = (sessionId2, sessionInfo) => {
-    if (sessions.get(sessionId2) !== sessionInfo || sessionInfo.activeRequests !== 0)
+    if (sessions.get(sessionId2) !== sessionInfo || sessionInfo.retiring ||
+        sessionInfo.activeRequests !== 0)
       return;
     if (sessionInfo.idleTimer)
       clearTimeout(sessionInfo.idleTimer);
@@ -48,10 +51,39 @@ async function handleStreamable(serverBackendFactory, req, res, sessions) {
     }, sessionInfo.idleTimeoutMs);
     sessionInfo.idleTimer.unref?.();
   };
+  const notifyRequestDrain = (sessionInfo) => {
+    if (!sessionInfo.retiring || sessionInfo.activeRequests > 1)
+      return;
+    const waiters = sessionInfo.drainWaiters.splice(0);
+    for (const resolve of waiters)
+      resolve();
+  };
+  const waitForRequestDrain = (sessionInfo) => new Promise((resolve) => {
+    let settled = false;
+    const finish = (drained) => {
+      if (settled)
+        return;
+      settled = true;
+      clearTimeout(timer);
+      const index = sessionInfo.drainWaiters.indexOf(onDrain);
+      if (index !== -1)
+        sessionInfo.drainWaiters.splice(index, 1);
+      resolve(drained);
+    };
+    const onDrain = () => finish(true);
+    const timer = setTimeout(() => finish(false), sessionInfo.drainTimeoutMs);
+    timer.unref?.();
+    sessionInfo.drainWaiters.push(onDrain);
+  });
   const sessionId = req.headers["mcp-session-id"];
   if (sessionId) {
     const sessionInfo = sessions.get(sessionId);
     if (!sessionInfo) {
+      res.statusCode = 404;
+      res.end("Session not found");
+      return;
+    }
+    if (sessionInfo.retiring) {
       res.statusCode = 404;
       res.end("Session not found");
       return;
@@ -62,35 +94,56 @@ async function handleStreamable(serverBackendFactory, req, res, sessions) {
     }
     sessionInfo.activeRequests++;
     try {
+      if (req.method === "DELETE") {
+        sessionInfo.retiring = true;
+        if (sessionInfo.activeRequests > 1 &&
+            !await waitForRequestDrain(sessionInfo)) {
+          console.error("[remote-chrome-mcp] active HTTP request drain timed out; exiting for a clean restart");
+          res.statusCode = 503;
+          res.end("Session cleanup timed out");
+          setImmediate(() => process.exit(1));
+          return;
+        }
+      }
       if (req.method === "GET")
         sessionInfo.transportInitialized.resolve();
       return await sessionInfo.transport.handleRequest(req, res);
     } finally {
       sessionInfo.activeRequests--;
+      notifyRequestDrain(sessionInfo);
       refreshIdleTimeout(sessionId, sessionInfo);
     }
   }
   if (req.method === "POST") {
     const idleTimeoutRaw = process.env.REMOTE_CHROME_MCP_SESSION_IDLE_TIMEOUT_MS ?? "1800000";
-    if (!/^[1-9][0-9]*$/.test(idleTimeoutRaw) ||
-        !Number.isSafeInteger(Number(idleTimeoutRaw)) ||
-        Number(idleTimeoutRaw) > 2147483647) {
+    const drainTimeoutRaw = process.env.REMOTE_CHROME_MCP_REQUEST_DRAIN_TIMEOUT_MS ?? "300000";
+    const validTimeout = (value2) => /^[1-9][0-9]*$/.test(value2) &&
+      Number.isSafeInteger(Number(value2)) && Number(value2) <= 2147483647;
+    if (!validTimeout(idleTimeoutRaw)) {
       res.statusCode = 500;
       res.end("Invalid REMOTE_CHROME_MCP_SESSION_IDLE_TIMEOUT_MS");
+      return;
+    }
+    if (!validTimeout(drainTimeoutRaw)) {
+      res.statusCode = 500;
+      res.end("Invalid REMOTE_CHROME_MCP_REQUEST_DRAIN_TIMEOUT_MS");
       return;
     }
     const idleTimeoutMs = Number(idleTimeoutRaw);
     let sessionInfo;
     const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => import_crypto27.default.randomUUID(),
+      sessionIdGenerator: () => import_crypto30.default.randomUUID(),
       onsessioninitialized: async (sessionId2) => {
         testDebug2("create http session");
         sessionInfo = {
           transport,
           transportInitialized: new ManualPromise(),
           idleTimeoutMs,
+          drainTimeoutMs: Number(drainTimeoutRaw),
           idleTimer: void 0,
-          activeRequests: 1
+          activeRequests: 1,
+          retiring: false,
+          drainWaiters: []
         };
         const rootsFallbackTimer = setTimeout(() => sessionInfo.transportInitialized.resolve(), 5e3);
         rootsFallbackTimer.unref?.();
@@ -114,6 +167,7 @@ async function handleStreamable(serverBackendFactory, req, res, sessions) {
     } finally {
       if (sessionInfo) {
         sessionInfo.activeRequests--;
+        notifyRequestDrain(sessionInfo);
         refreshIdleTimeout(transport.sessionId, sessionInfo);
       }
     }
@@ -240,10 +294,12 @@ function verifyOriginalSource(source) {
 
 function verifyPatchedSource(source) {
   const sourceHash = sha256(source);
-  if (sourceHash !== EXPECTED_PATCHED_SOURCE_SHA256) {
+  if (sourceHash !== EXPECTED_PATCHED_SOURCE_SHA256 &&
+      sourceHash !== EXPECTED_LIFECYCLE_PATCHED_SOURCE_SHA256) {
     throw new Error(
-      `patched coreBundle.js SHA-256 mismatch: expected ` +
-      `${EXPECTED_PATCHED_SOURCE_SHA256}, got ${sourceHash}`
+      `patched coreBundle.js SHA-256 mismatch: expected HTTP-only ` +
+      `${EXPECTED_PATCHED_SOURCE_SHA256} or combined ` +
+      `${EXPECTED_LIFECYCLE_PATCHED_SOURCE_SHA256}, got ${sourceHash}`
     );
   }
   if (countOccurrences(source, PATCH_MARKER) !== 1)
@@ -286,10 +342,12 @@ module.exports = {
   EXPECTED_ORIGINAL_SOURCE_SHA256,
   EXPECTED_ORIGINAL_BLOCK_SHA256,
   EXPECTED_PATCHED_SOURCE_SHA256,
+  EXPECTED_LIFECYCLE_PATCHED_SOURCE_SHA256,
   PATCHED_BLOCK,
   PATCH_MARKER,
   START_MARKER,
   END_MARKER,
+  originalBlockBounds,
   sha256
 };
 

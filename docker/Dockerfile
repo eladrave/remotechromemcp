@@ -1,6 +1,6 @@
 FROM node:22-bookworm-slim
 
-ARG PLAYWRIGHT_MCP_VERSION=0.0.78
+ARG PLAYWRIGHT_MCP_VERSION=0.0.79
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -28,6 +28,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY docker/patch-playwright-mcp-http.cjs /tmp/patch-playwright-mcp-http.cjs
+COPY docker/patch-playwright-mcp-lifecycle.cjs /tmp/patch-playwright-mcp-lifecycle.cjs
 
 RUN test -n "$PLAYWRIGHT_MCP_VERSION" \
     && npm install -g "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" \
@@ -35,12 +36,24 @@ RUN test -n "$PLAYWRIGHT_MCP_VERSION" \
       --mcp-package-json /usr/local/lib/node_modules/@playwright/mcp/package.json \
     && node /tmp/patch-playwright-mcp-http.cjs --check \
       --mcp-package-json /usr/local/lib/node_modules/@playwright/mcp/package.json \
-    && rm -f /tmp/patch-playwright-mcp-http.cjs \
+    && node /tmp/patch-playwright-mcp-lifecycle.cjs \
+      --mcp-package-json /usr/local/lib/node_modules/@playwright/mcp/package.json \
+    && node /tmp/patch-playwright-mcp-lifecycle.cjs --check \
+      --mcp-package-json /usr/local/lib/node_modules/@playwright/mcp/package.json \
     && groupadd --gid 10001 remote-chrome \
     && useradd --uid 10001 --gid remote-chrome --create-home \
       --home-dir /home/remote-chrome remote-chrome \
     && install -d -o remote-chrome -g remote-chrome \
       /data/chrome-profile /run/remote-chrome /opt/remote-chrome \
+    && install -m 0444 -o root -g root \
+      /tmp/patch-playwright-mcp-http.cjs \
+      /opt/remote-chrome/verify-playwright-mcp-http-patch.cjs \
+    && install -m 0444 -o root -g root \
+      /tmp/patch-playwright-mcp-lifecycle.cjs \
+      /opt/remote-chrome/verify-playwright-mcp-lifecycle-patch.cjs \
+    && rm -f \
+      /tmp/patch-playwright-mcp-http.cjs \
+      /tmp/patch-playwright-mcp-lifecycle.cjs \
     && ln -sf /usr/share/novnc/vnc.html /usr/share/novnc/index.html \
     && sed -i \
       "s|UI.initSetting('path', 'websockify');|UI.initSetting('path', 'login/websockify');|" \

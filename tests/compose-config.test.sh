@@ -20,6 +20,15 @@ assert_contains() {
   grep -Eq -- "$pattern" "$file" || fail "$description"
 }
 
+assert_not_contains() {
+  local file="$1"
+  local pattern="$2"
+  local description="$3"
+  if grep -Eq -- "$pattern" "$file"; then
+    fail "$description"
+  fi
+}
+
 for file in \
   .env.example \
   compose.yaml \
@@ -28,6 +37,7 @@ for file in \
   docker/entrypoint.sh \
   docker/healthcheck.sh \
   docker/patch-playwright-mcp-http.cjs \
+  docker/patch-playwright-mcp-lifecycle.cjs \
   docker/supervisord.conf; do
   require_file "$file"
 done
@@ -100,6 +110,8 @@ if (browser.init !== true || browser.restart !== 'unless-stopped' || !browser.sh
   throw new Error('browser lifecycle settings are incomplete');
 if (browser.environment?.REMOTE_CHROME_MCP_SESSION_IDLE_TIMEOUT_MS !== '1800000')
   throw new Error('browser must receive the bounded MCP session idle timeout');
+if (browser.environment?.REMOTE_CHROME_MCP_REQUEST_DRAIN_TIMEOUT_MS !== '300000')
+  throw new Error('browser must receive the bounded MCP request drain timeout');
 if (browser.environment?.REMOTE_CHROME_LOGIN_TOKEN_URL !==
     'https://chrome.example.test/login/?token=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210')
   throw new Error('browser must receive the exact protected human-handoff URL');
@@ -147,6 +159,7 @@ assert.match(browser, /^\s{4}restart: unless-stopped$/m);
 assert.match(browser, /^\s{4}stop_grace_period: 45s$/m);
 assert.match(browser, /^\s{4}shm_size:/m);
 assert.match(browser, /REMOTE_CHROME_MCP_SESSION_IDLE_TIMEOUT_MS/);
+assert.match(browser, /REMOTE_CHROME_MCP_REQUEST_DRAIN_TIMEOUT_MS/);
 assert.match(browser, /REMOTE_CHROME_LOGIN_TOKEN_URL: https:\/\/\$\{DOMAIN:\?set DOMAIN\}\/login\/\?token=\$\{LOGIN_TOKEN:\?set LOGIN_TOKEN\}/);
 assert.match(browser, /chrome-profile:\/data\/chrome-profile/);
 assert.match(proxy, /\$\{PROXY_BIND_ADDRESS:-0\.0\.0\.0\}:\$\{PROXY_HTTP_PORT:-80\}:80/);
@@ -190,6 +203,12 @@ assert_contains docker/Dockerfile 'npm install -g "@playwright/mcp@\$\{PLAYWRIGH
   'Dockerfile must use a valid npm package spec for the pinned Playwright MCP version'
 assert_contains docker/Dockerfile 'patch-playwright-mcp-http\.cjs --check' \
   'Docker build must verify the exact Playwright MCP HTTP session patch'
+assert_contains docker/Dockerfile 'patch-playwright-mcp-lifecycle\.cjs --check' \
+  'Docker build must verify the exact Playwright MCP lifecycle patch'
+assert_contains docker/Dockerfile 'verify-playwright-mcp-http-patch\.cjs' \
+  'browser image must retain the exact HTTP patch verifier'
+assert_contains docker/Dockerfile 'verify-playwright-mcp-lifecycle-patch\.cjs' \
+  'browser image must retain the exact lifecycle patch verifier'
 assert_contains docker/Dockerfile '^USER remote-chrome$' \
   'browser runtime must run as a non-root user'
 
@@ -209,6 +228,8 @@ assert_contains docker/supervisord.conf 'NODE_PATH=.*@playwright/mcp/node_module
   'instruction preload must resolve globally installed Playwright dependencies'
 assert_contains docker/supervisord.conf '^command=/usr/bin/openbox$' \
   'Openbox must use DISPLAY from its environment instead of an unsupported flag'
+assert_not_contains docker/supervisord.conf 'unix_http_server|rpcinterface:supervisor|supervisorctl' \
+  'the non-root container must not expose a full Supervisor control interface'
 SUPERVISOR_FILE=docker/supervisord.conf node <<'NODE'
 const fs = require('node:fs');
 const assert = require('node:assert/strict');

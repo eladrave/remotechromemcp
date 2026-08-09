@@ -541,7 +541,7 @@ grep -Fxq 'PROXY_HTTP_PORT=80' "$compose_candidate" ||
   fail 'Compose must publish only HTTP 80'
 grep -Fxq 'PROXY_HTTPS_PORT=443' "$compose_candidate" ||
   fail 'Compose must publish only HTTPS 443'
-grep -Fxq 'PLAYWRIGHT_MCP_VERSION=0.0.78' "$compose_candidate" ||
+grep -Fxq 'PLAYWRIGHT_MCP_VERSION=0.0.79' "$compose_candidate" ||
   fail 'Compose must pin the MCP version'
 
 # Secret replacement must reject every symlinked managed component and must

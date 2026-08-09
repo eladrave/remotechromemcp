@@ -43,7 +43,7 @@ if command -v docker >/dev/null 2>&1 &&
     printf 'LOGIN_TOKEN=%s\n' "$(printf 'b%.0s' {1..64})"
     printf 'LOGIN_USERNAME=remotechrome\n'
     printf "LOGIN_PASSWORD_HASH='%s'\n" "$hash"
-    printf 'PLAYWRIGHT_MCP_VERSION=0.0.78\n'
+    printf 'PLAYWRIGHT_MCP_VERSION=0.0.79\n'
     printf 'SCREEN_GEOMETRY=1440x900x24\n'
     printf 'REMOTE_CHROME_DATA_DIR=/var/lib/remote-chrome\n'
   } >"$env_file"

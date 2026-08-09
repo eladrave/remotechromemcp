@@ -43,6 +43,7 @@ MCP_TOKEN=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 LOGIN_TOKEN=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
 LOGIN_USERNAME=smokeoperator
 LOGIN_PASSWORD=hiccup
+LIFECYCLE_IDLE_TIMEOUT_MS=5000
 http_port="$(allocate_port)"
 https_port="$(allocate_port)"
 while [[ "$https_port" == "$http_port" ]]; do
@@ -64,7 +65,7 @@ trap cleanup EXIT
   printf 'LOGIN_USERNAME=%s\n' "$LOGIN_USERNAME"
   printf '%s\n' \
     "LOGIN_PASSWORD_HASH='\$2a\$14\$Zkx19XLiW6VYouLHR5NmfOFU0z2GTNmpkT/5qqR7hx4IjWJPDhjvG'"
-  printf 'PLAYWRIGHT_MCP_VERSION=0.0.78\n'
+  printf 'PLAYWRIGHT_MCP_VERSION=0.0.79\n'
   printf 'SCREEN_GEOMETRY=1280x800x24\n'
   printf 'PROXY_BIND_ADDRESS=127.0.0.1\n'
   printf 'PROXY_HTTP_PORT=%s\n' "$http_port"
@@ -112,6 +113,17 @@ wait_for_healthy() {
 "${compose[@]}" up -d --build
 wait_for_healthy browser
 wait_for_healthy proxy
+
+"${compose[@]}" exec -T browser node \
+  /opt/remote-chrome/verify-playwright-mcp-http-patch.cjs --check \
+  --mcp-package-json /usr/local/lib/node_modules/@playwright/mcp/package.json
+"${compose[@]}" exec -T browser node \
+  /opt/remote-chrome/verify-playwright-mcp-lifecycle-patch.cjs --check \
+  --mcp-package-json /usr/local/lib/node_modules/@playwright/mcp/package.json
+[[ $("${compose[@]}" exec -T browser node -p \
+  'require("/usr/local/lib/node_modules/@playwright/mcp/package.json").version') == 0.0.79 ]]
+[[ $("${compose[@]}" exec -T browser node -p \
+  'require("/usr/local/lib/node_modules/@playwright/mcp/node_modules/playwright-core/package.json").version') == 1.63.0-alpha-2026-08-05 ]]
 
 "${compose[@]}" exec -T browser bash -euo pipefail -c '
   metadata="$(curl -fsS http://127.0.0.1:9222/json/version)"
@@ -509,5 +521,21 @@ for id in $("${compose[@]}" ps -q); do
     fi
   done
 done
+
+printf 'REMOTE_CHROME_MCP_SESSION_IDLE_TIMEOUT_MS=%s\n' \
+  "$LIFECYCLE_IDLE_TIMEOUT_MS" >>"$env_file"
+printf 'REMOTE_CHROME_MCP_REQUEST_DRAIN_TIMEOUT_MS=5000\n' >>"$env_file"
+"${compose[@]}" up -d --force-recreate --no-deps browser
+wait_for_healthy browser
+docker cp tests/mcp-browser-lifecycle-regression.cjs \
+  "$(container_id browser):/tmp/mcp-browser-lifecycle-regression.cjs"
+"${compose[@]}" exec -T --user root browser chmod 0444 \
+  /tmp/mcp-browser-lifecycle-regression.cjs
+"${compose[@]}" exec -T browser node \
+  /tmp/mcp-browser-lifecycle-regression.cjs \
+  --server-idle-timeout-ms "$LIFECYCLE_IDLE_TIMEOUT_MS" \
+  --idle-wait-ms 6500 \
+  --seed compose-lifecycle-20260809 \
+  --operations 30
 
 printf 'PASS: Compose full-stack runtime, routing, and profile persistence\n'
